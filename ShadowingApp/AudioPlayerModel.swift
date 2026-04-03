@@ -100,11 +100,37 @@ class AudioPlayerModel: NSObject, ObservableObject {
         }
     }
 
+    /// 트랙 선택만 (재생 안 함) — 탭 시 사용
+    func selectTrack(at index: Int) {
+        guard index < playlist.count else { return }
+        if currentTrackIndex == index { return }
+        currentTrackIndex = index
+        loadAudio(url: playlist[index].url)
+    }
+
+    /// 트랙 선택 + 바로 재생 — 꾹 누르기 시 사용
     func playTrack(at index: Int) {
         guard index < playlist.count else { return }
+
+        if currentTrackIndex == index {
+            // 이미 선택된 트랙이면 처음부터 재생
+            seek(to: 0)
+            if !isPlaying { togglePlay() }
+            return
+        }
+
         currentTrackIndex = index
         loadAudio(url: playlist[index].url)
         togglePlay()
+    }
+
+    /// 트랙 선택 해제 + 정지
+    func stopAndDeselect() {
+        stopPlayback()
+        audioURL = nil
+        currentTrackIndex = -1
+        sentences = []
+        waveformData = []
     }
 
     private func stopPlayback() {
