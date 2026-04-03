@@ -2,11 +2,11 @@ import SwiftUI
 import AVFoundation
 import UniformTypeIdentifiers
 
-// MARK: - Content View
+// MARK: - Content View (목록 화면)
 struct ContentView: View {
     @StateObject private var player = AudioPlayerModel()
     @State private var showFilePicker = false
-    @State private var showScript = true
+    @State private var selectedTrackIndex: Int?
 
     var body: some View {
         NavigationStack {
@@ -14,45 +14,10 @@ struct ContentView: View {
                 Color(.systemGroupedBackground).ignoresSafeArea()
                 ScrollView {
                     VStack(spacing: 16) {
-
-                        // 플레이리스트
-                        PlaylistView(player: player, showFilePicker: $showFilePicker)
-
-                        if player.audioURL != nil {
-
-                            // 웨이브폼
-                            WaveformView(player: player)
-                                .frame(height: 80)
-                                .clipShape(RoundedRectangle(cornerRadius: 12))
-
-                            HStack {
-                                Text(formatTime(player.currentTime))
-                                Spacer()
-                                if player.loopSectionEnabled {
-                                    Text("핸들 드래그로 구간 설정")
-                                        .font(.caption)
-                                        .foregroundStyle(.tint)
-                                }
-                                Spacer()
-                                Text(formatTime(player.duration))
-                            }
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 4)
-
-                            PlaybackControlsView(player: player)
-                            SpeedControlView(player: player)
-
-                            if player.loopSectionEnabled {
-                                LoopCountView(player: player)
-                            }
-
-                            ScriptView(player: player, isVisible: $showScript)
-                            RecordingView(player: player)
-
-                        } else {
-                            UploadZoneView { showFilePicker = true }
-                        }
+                        PlaylistView(
+                            player: player,
+                            selectedTrackIndex: $selectedTrackIndex
+                        )
                     }
                     .padding()
                 }
@@ -75,23 +40,19 @@ struct ContentView: View {
                     for url in urls {
                         player.addTrack(url: url)
                     }
-                    if player.audioURL == nil, let first = urls.first {
-                        player.loadAudio(url: first)
-                    }
                 }
+            }
+            .navigationDestination(item: $selectedTrackIndex) { index in
+                TrackDetailView(player: player, trackIndex: index)
             }
         }
     }
-
-    func formatTime(_ time: Double) -> String {
-        String(format: "%d:%02d", Int(time) / 60, Int(time) % 60)
-    }
 }
 
-// MARK: - Playlist View
+// MARK: - Playlist View (목록)
 struct PlaylistView: View {
     @ObservedObject var player: AudioPlayerModel
-    @Binding var showFilePicker: Bool
+    @Binding var selectedTrackIndex: Int?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -100,12 +61,11 @@ struct PlaylistView: View {
                     .font(.subheadline)
                     .fontWeight(.medium)
                 Spacer()
-
             }
             .padding(.horizontal, 4)
 
             if player.playlist.isEmpty {
-                Text("파일을 추가해주세요")
+                Text("+ 버튼을 눌러 파일을 추가해주세요")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .center)
@@ -121,7 +81,8 @@ struct PlaylistView: View {
                             isPlaying: player.currentTrackIndex == index && player.isPlaying,
                             isCurrent: player.currentTrackIndex == index
                         ) {
-                            player.playTrack(at: index)
+                            player.selectTrack(at: index)
+                            selectedTrackIndex = index
                         } onDelete: {
                             player.removeTrack(at: index)
                         }
@@ -134,6 +95,65 @@ struct PlaylistView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 12))
             }
         }
+    }
+}
+
+// MARK: - Track Detail View (상세/재생 화면)
+struct TrackDetailView: View {
+    @ObservedObject var player: AudioPlayerModel
+    let trackIndex: Int
+    @State private var showScript = true
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 16) {
+                // 웨이브폼
+                WaveformView(player: player)
+                    .frame(height: 80)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+
+                // 시간 표시
+                HStack {
+                    Text(formatTime(player.currentTime))
+                    Spacer()
+                    if player.loopSectionEnabled {
+                        Text("핸들 드래그로 구간 설정")
+                            .font(.caption)
+                            .foregroundStyle(.tint)
+                    }
+                    Spacer()
+                    Text(formatTime(player.duration))
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 4)
+
+                // 재생 컨트롤
+                PlaybackControlsView(player: player)
+
+                // 속도 조절
+                SpeedControlView(player: player)
+
+                // 반복 횟수
+                if player.loopSectionEnabled {
+                    LoopCountView(player: player)
+                }
+
+                // 스크립트
+                ScriptView(player: player, isVisible: $showScript)
+
+                // 녹음
+                RecordingView(player: player)
+            }
+            .padding()
+        }
+        .background(Color(.systemGroupedBackground))
+        .navigationTitle(player.trackName)
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    func formatTime(_ time: Double) -> String {
+        String(format: "%d:%02d", Int(time) / 60, Int(time) % 60)
     }
 }
 
@@ -173,6 +193,10 @@ struct PlaylistItemView: View {
 
             Spacer()
 
+            Image(systemName: "chevron.right")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+
             Button(role: .destructive) { onDelete() } label: {
                 Image(systemName: "xmark.circle.fill")
                     .foregroundStyle(.secondary)
@@ -187,35 +211,6 @@ struct PlaylistItemView: View {
 
     func formatTime(_ t: Double) -> String {
         String(format: "%d:%02d", Int(t) / 60, Int(t) % 60)
-    }
-}
-
-// MARK: - Upload Zone
-struct UploadZoneView: View {
-    let onTap: () -> Void
-    var body: some View {
-        Button(action: onTap) {
-            VStack(spacing: 12) {
-                Image(systemName: "music.note")
-                    .font(.system(size: 40))
-                    .foregroundStyle(.tint)
-                Text("오디오 파일 불러오기")
-                    .font(.headline)
-                Text("MP3, WAV, M4A 등 — 여러 개 한 번에 추가 가능")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 40)
-            .background(Color(.secondarySystemGroupedBackground))
-            .clipShape(RoundedRectangle(cornerRadius: 16))
-            .overlay(
-                RoundedRectangle(cornerRadius: 16)
-                    .strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [6]))
-                    .foregroundStyle(.tint.opacity(0.4))
-            )
-        }
-        .buttonStyle(.plain)
     }
 }
 
@@ -260,7 +255,6 @@ struct WaveformView: View {
                         .frame(width: max(0, ex - sx))
                         .offset(x: sx)
 
-                    // 시작 핸들 (초록)
                     Rectangle()
                         .fill(Color.accentColor)
                         .frame(width: 4)
@@ -270,7 +264,6 @@ struct WaveformView: View {
                             player.loopStart = pct * player.duration
                         })
 
-                    // 종료 핸들 (주황)
                     Rectangle()
                         .fill(Color.orange)
                         .frame(width: 4)
@@ -551,6 +544,7 @@ struct RecordingView: View {
         } else {
             isRecording = true
             recordingSeconds = 0
+            player.startRecording()
             recTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
                 Task { @MainActor in
                     self.recordingSeconds += 1
