@@ -28,6 +28,7 @@ struct SentenceSegment: Identifiable {
 }
 
 // MARK: - Audio Player Model
+@MainActor
 class AudioPlayerModel: NSObject, ObservableObject {
 
     // MARK: - Published
@@ -42,10 +43,11 @@ class AudioPlayerModel: NSObject, ObservableObject {
     // 플레이리스트
     @Published var playlist: [TrackItem] = []
     @Published var currentTrackIndex: Int = -1
+    @Published var selectedTrackIndices: Set<Int> = []  // 꾹 눌러 선택한 트랙
 
     // 반복
     @Published var loopSectionEnabled: Bool = false
-    @Published var loopAllEnabled: Bool = false
+    @Published var loopAllEnabled: Bool = false  // 선택된 트랙 전체 반복
     @Published var loopStart: Double = 0
     @Published var loopEnd: Double = 10
     @Published var loopCount: Int = 3
@@ -71,15 +73,13 @@ class AudioPlayerModel: NSObject, ObservableObject {
             .appendingPathComponent(UUID().uuidString + "_" + url.lastPathComponent)
         try? FileManager.default.copyItem(at: url, to: tempURL)
 
-        var duration = 0.0
+        var dur = 0.0
         if let p = try? AVAudioPlayer(contentsOf: tempURL) {
-            duration = p.duration
+            dur = p.duration
         }
 
-        let track = TrackItem(url: tempURL, name: url.lastPathComponent, duration: duration)
-        DispatchQueue.main.async {
-            self.playlist.append(track)
-        }
+        let track = TrackItem(url: tempURL, name: url.lastPathComponent, duration: dur)
+        playlist.append(track)
     }
 
     func removeTrack(at index: Int) {
@@ -140,21 +140,53 @@ class AudioPlayerModel: NSObject, ObservableObject {
         currentTime = 0
     }
 
+    /// 선택 트랙 토글 (꾹 눌러 선택/해제)
+    func toggleTrackSelection(at index: Int) {
+        if selectedTrackIndices.contains(index) {
+            selectedTrackIndices.remove(index)
+        } else {
+            selectedTrackIndices.insert(index)
+        }
+    }
+
+    /// 선택된 트랙들 전체 반복 재생 시작
+    func playSelectedTracks() {
+        let sorted = selectedTrackIndices.sorted()
+        guard let first = sorted.first else { return }
+        loopAllEnabled = true
+        playTrack(at: first)
+    }
+    
+    func stop() {
+        self.player?.stop()
+        for p in recordingPlayers {
+            p.stop()
+        }
+        self.isPlaying = false
+        self.timer?.invalidate()
+        self.timer = nil
+    }
+
     // MARK: - 다음 트랙으로
     func playNextTrack() {
         guard !playlist.isEmpty else { return }
-        
-        let nextIndex = currentTrackIndex + 1
-        
-        if nextIndex < playlist.count {
-            // 다음 파일이 있으면 재생
-            playTrack(at: nextIndex)
-        } else if loopAllEnabled {
-            // 마지막 파일인데 전체 반복이 켜져 있으면 다시 첫 번째 파일로
-            playTrack(at: 0)
+
+        if loopAllEnabled && !selectedTrackIndices.isEmpty {
+            // 선택된 트랙들만 순회
+            let sorted = selectedTrackIndices.sorted()
+            if let nextIdx = sorted.first(where: { $0 > currentTrackIndex }) {
+                playTrack(at: nextIdx)
+            } else {
+                // 마지막이면 다시 첫 번째 선택 트랙으로
+                playTrack(at: sorted[0])
+            }
         } else {
-            // 반복 안 켜져 있으면 정지
-            stopPlayback()
+            let nextIndex = currentTrackIndex + 1
+            if nextIndex < playlist.count {
+                playTrack(at: nextIndex)
+            } else {
+                stopPlayback()
+            }
         }
     }
 
@@ -180,7 +212,6 @@ class AudioPlayerModel: NSObject, ObservableObject {
             currentTime = 0
 
             generateWaveform(url: url)
-            analyzeAudio(url: url)
         } catch {
             print("오디오 로드 실패: \(error)")
         }
@@ -215,37 +246,15 @@ class AudioPlayerModel: NSObject, ObservableObject {
     private func startTimer() {
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
-            guard let self = self, let player = self.player else { return }
-            self.currentTime = player.currentTime
+            MainActor.assumeIsolated {
+                guard let self = self, let player = self.player else { return }
+                self.currentTime = player.currentTime
 
-            // 1. 구간 반복(Loop Section)이 켜져 있을 때
-            if self.loopSectionEnabled {
-                if player.currentTime >= self.loopEnd {
-                    self.currentLoopRepeat += 1
-                    
-                    if self.currentLoopRepeat < self.loopCount {
-                        // 아직 지정된 횟수만큼 반복 전이면 다시 시작점으로
+                // 구간 반복이 켜져 있으면 끝에 도달 시 시작점으로 되돌림 (무한 반복)
+                if self.loopSectionEnabled {
+                    if player.currentTime >= self.loopEnd {
                         self.seek(to: self.loopStart)
-                    } else {
-                        // 반복 횟수를 다 채웠다면?
-                        self.currentLoopRepeat = 0
-                        
-                        if self.loopAllEnabled {
-                            // 전체 반복이 켜져 있으면 다음 트랙으로 넘기거나 처음부터 재생
-                            self.playNextTrack()
-                        } else {
-                            // 꺼져 있으면 여기서 정지
-                            player.pause()
-                            self.isPlaying = false
-                            self.stopTimer()
-                        }
                     }
-                }
-            }
-            // 2. 구간 반복은 꺼져 있고 전체 반복(Loop All)만 켜져 있을 때
-            else if self.loopAllEnabled {
-                if player.currentTime >= self.duration - 0.1 {
-                    self.playNextTrack()
                 }
             }
         }
@@ -258,73 +267,94 @@ class AudioPlayerModel: NSObject, ObservableObject {
 
     // MARK: - Waveform
     private func generateWaveform(url: URL) {
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self = self else { return }
-            do {
-                let file = try AVAudioFile(forReading: url)
-                let format = file.processingFormat
-                let frameCount = AVAudioFrameCount(file.length)
-                guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else { return }
-                try file.read(into: buffer)
-                guard let channelData = buffer.floatChannelData?[0] else { return }
-                let frameLength = Int(buffer.frameLength)
-                let samplesPerBar = max(1, frameLength / 60)
-                var bars: [Float] = []
-                for i in 0..<60 {
-                    let start = i * samplesPerBar
-                    let end = min(start + samplesPerBar, frameLength)
-                    var sum: Float = 0
-                    for j in start..<end { sum += abs(channelData[j]) }
-                    bars.append(sum / Float(end - start))
-                }
-                let maxVal = bars.max() ?? 1.0
-                let normalized = maxVal > 0 ? bars.map { $0 / maxVal } : bars
-                DispatchQueue.main.async { self.waveformData = normalized }
-            } catch {
-                DispatchQueue.main.async {
-                    self.waveformData = (0..<60).map { _ in Float.random(in: 0.2...1.0) }
-                }
+        Task {
+            let bars = await Self.computeWaveform(url: url)
+            self.waveformData = bars
+        }
+    }
+
+    private nonisolated static func computeWaveform(url: URL) async -> [Float] {
+        do {
+            let file = try AVAudioFile(forReading: url)
+            let format = file.processingFormat
+            let frameCount = AVAudioFrameCount(file.length)
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else {
+                return (0..<60).map { _ in Float.random(in: 0.2...1.0) }
             }
+            try file.read(into: buffer)
+            guard let channelData = buffer.floatChannelData?[0] else {
+                return (0..<60).map { _ in Float.random(in: 0.2...1.0) }
+            }
+            let frameLength = Int(buffer.frameLength)
+            let samplesPerBar = max(1, frameLength / 60)
+            var bars: [Float] = []
+            for i in 0..<60 {
+                let start = i * samplesPerBar
+                let end = min(start + samplesPerBar, frameLength)
+                var sum: Float = 0
+                for j in start..<end { sum += abs(channelData[j]) }
+                bars.append(sum / Float(end - start))
+            }
+            let maxVal = bars.max() ?? 1.0
+            return maxVal > 0 ? bars.map { $0 / maxVal } : bars
+        } catch {
+            return (0..<60).map { _ in Float.random(in: 0.2...1.0) }
         }
     }
 
     // MARK: - Speech Analysis
     func analyzeAudio(url: URL) {
+        guard !isAnalyzing else { return }
+        isAnalyzing = true
+        sentences.removeAll()
+
         SFSpeechRecognizer.requestAuthorization { [weak self] status in
-            guard status == .authorized, let self = self else { return }
-            DispatchQueue.main.async { self.isAnalyzing = true }
-
-            let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
-            let request = SFSpeechURLRecognitionRequest(url: url)
-            request.shouldReportPartialResults = false
-
-            recognizer?.recognitionTask(with: request) { [weak self] result, error in
-                guard let self = self, let result = result, result.isFinal else { return }
-
-                var segments: [SentenceSegment] = []
-                var sentenceStart: Double = 0
-                var sentenceWords: [String] = []
-
-                for segment in result.bestTranscription.segments {
-                    sentenceWords.append(segment.substring)
-                    let isPunctuation = segment.substring.hasSuffix(".") ||
-                                       segment.substring.hasSuffix("?") ||
-                                       segment.substring.hasSuffix("!")
-                    if isPunctuation || segment === result.bestTranscription.segments.last {
-                        let endTime = segment.timestamp + segment.duration
-                        segments.append(SentenceSegment(
-                            text: sentenceWords.joined(separator: " "),
-                            startTime: sentenceStart,
-                            endTime: endTime + 0.3
-                        ))
-                        sentenceStart = endTime
-                        sentenceWords = []
-                    }
+            Task { @MainActor [weak self] in
+                guard status == .authorized, let self = self else {
+                    self?.isAnalyzing = false
+                    return
                 }
 
-                DispatchQueue.main.async {
-                    self.sentences = segments
-                    self.isAnalyzing = false
+                let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
+                let request = SFSpeechURLRecognitionRequest(url: url)
+                request.shouldReportPartialResults = false
+
+                recognizer?.recognitionTask(with: request) { [weak self] result, error in
+                    Task { @MainActor [weak self] in
+                        guard let self = self else { return }
+
+                        if let result = result, result.isFinal {
+                            let segments = result.bestTranscription.segments
+                            // 세그먼트를 문장 단위로 묶기
+                            var grouped: [SentenceSegment] = []
+                            var words: [String] = []
+                            var sentenceStart: Double = 0
+
+                            for seg in segments {
+                                if words.isEmpty { sentenceStart = seg.timestamp }
+                                words.append(seg.substring)
+
+                                let isPunctuation = seg.substring.hasSuffix(".") ||
+                                    seg.substring.hasSuffix("?") || seg.substring.hasSuffix("!")
+                                let isLast = seg === segments.last
+
+                                if isPunctuation || isLast {
+                                    grouped.append(SentenceSegment(
+                                        text: words.joined(separator: " "),
+                                        startTime: sentenceStart,
+                                        endTime: seg.timestamp + seg.duration + 0.3
+                                    ))
+                                    words = []
+                                }
+                            }
+
+                            self.sentences = grouped
+                            self.isAnalyzing = false
+                        } else if let error = error {
+                            print("분석 에러: \(error)")
+                            self.isAnalyzing = false
+                        }
+                    }
                 }
             }
         }
@@ -332,10 +362,11 @@ class AudioPlayerModel: NSObject, ObservableObject {
 
     // MARK: - Recording
     func startRecording() {
-        let session = AVAudioSession.sharedInstance()
-        session.requestRecordPermission { [weak self] granted in
-            guard granted, let self = self else { return }
+        Task {
+            let granted = await AVAudioApplication.requestRecordPermission()
+            guard granted else { return }
             do {
+                let session = AVAudioSession.sharedInstance()
                 try session.setCategory(.playAndRecord, mode: .default, options: .defaultToSpeaker)
                 try session.setActive(true)
                 let url = FileManager.default.temporaryDirectory
@@ -389,4 +420,3 @@ extension AudioPlayerModel: AVAudioPlayerDelegate {
         }
     }
 }
-

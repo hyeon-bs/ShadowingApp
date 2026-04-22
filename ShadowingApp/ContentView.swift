@@ -6,24 +6,29 @@ import UniformTypeIdentifiers
 struct ContentView: View {
     @StateObject private var player = AudioPlayerModel()
     @State private var showFilePicker = false
-    @State private var selectedTrackIndex: Int?
+    @State private var navigationPath = NavigationPath()
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $navigationPath) {
             ZStack {
                 Color(.systemGroupedBackground).ignoresSafeArea()
                 ScrollView {
                     VStack(spacing: 16) {
-                        PlaylistView(
-                            player: player,
-                            selectedTrackIndex: $selectedTrackIndex
-                        )
+                        PlaylistView(player: player) { index in
+                            navigationPath.append(index)
+                        }
                     }
                     .padding()
                 }
             }
             .navigationTitle("쉐도잉")
             .navigationBarTitleDisplayMode(.large)
+            .navigationDestination(for: Int.self) { index in
+                TrackDetailView(player: player, trackIndex: index)
+            }
+            .onDisappear {
+                player.stop()
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { showFilePicker = true } label: {
@@ -42,7 +47,7 @@ struct ContentView: View {
                     }
                 }
             }
-            .navigationDestination(item: $selectedTrackIndex) { index in
+            .navigationDestination(for: Int.self) { index in
                 TrackDetailView(player: player, trackIndex: index)
             }
         }
@@ -52,7 +57,8 @@ struct ContentView: View {
 // MARK: - Playlist View (목록)
 struct PlaylistView: View {
     @ObservedObject var player: AudioPlayerModel
-    @Binding var selectedTrackIndex: Int?
+    @State private var isSelectionMode = false
+    var onTapTrack: (Int) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -61,6 +67,19 @@ struct PlaylistView: View {
                     .font(.subheadline)
                     .fontWeight(.medium)
                 Spacer()
+                if isSelectionMode {
+                    Button {
+                        player.stop()
+                        player.selectedTrackIndices.removeAll()
+                        withAnimation {
+                            isSelectionMode = false
+                        }
+                    } label: {
+                        Text("취소")
+                            .font(.caption)
+                            .fontWeight(.medium)
+                    }
+                }
             }
             .padding(.horizontal, 4)
 
@@ -75,17 +94,36 @@ struct PlaylistView: View {
             } else {
                 VStack(spacing: 0) {
                     ForEach(Array(player.playlist.enumerated()), id: \.element.id) { index, track in
-                        PlaylistItemView(
-                            track: track,
-                            index: index,
-                            isPlaying: player.currentTrackIndex == index && player.isPlaying,
-                            isCurrent: player.currentTrackIndex == index
-                        ) {
-                            player.selectTrack(at: index)
-                            selectedTrackIndex = index
-                        } onDelete: {
-                            player.removeTrack(at: index)
+                        Button {
+                            // 일반 탭 처리
+                            if isSelectionMode {
+                                player.toggleTrackSelection(at: index)
+                                if player.selectedTrackIndices.isEmpty {
+                                    isSelectionMode = false
+                                }
+                            } else {
+                                onTapTrack(index)
+                            }
+                        } label: {
+                            PlaylistRowView(
+                                track: track,
+                                index: index,
+                                isPlaying: player.currentTrackIndex == index && player.isPlaying,
+                                isCurrent: player.currentTrackIndex == index,
+                                isSelected: player.selectedTrackIndices.contains(index)
+                            )
                         }
+                        .buttonStyle(.plain)
+                        .simultaneousGesture(
+                            LongPressGesture(minimumDuration: 0.5)
+                                .onEnded { _ in
+                                    // 꾹 누르는 제스쳐에 따라서 선택모드
+                                    if !isSelectionMode {
+                                        isSelectionMode = true
+                                        player.toggleTrackSelection(at: index)
+                                    }
+                                }
+                        )
                         if index < player.playlist.count - 1 {
                             Divider().padding(.leading, 52)
                         }
@@ -93,6 +131,34 @@ struct PlaylistView: View {
                 }
                 .background(Color(.secondarySystemGroupedBackground))
                 .clipShape(RoundedRectangle(cornerRadius: 12))
+
+                // 선택 모드 하단 바
+                if isSelectionMode {
+                    HStack {
+                        Button {
+                            if player.selectedTrackIndices.count == player.playlist.count {
+                                player.selectedTrackIndices.removeAll()
+                            } else {
+                                player.selectedTrackIndices = Set(0..<player.playlist.count)
+                            }
+                        } label: {
+                            Text(player.selectedTrackIndices.count == player.playlist.count ? "전체해제" : "전체선택")
+                                .font(.subheadline)
+                                .foregroundStyle(.tint)
+                        }
+                        Spacer()
+                        Button {
+                            player.playSelectedTracks()
+                        } label: {
+                            Text("반복재생")
+                                .font(.subheadline)
+                                .foregroundColor(player.selectedTrackIndices.isEmpty ? .secondary : .accentColor)
+                        }
+                        .disabled(player.selectedTrackIndices.isEmpty)
+                    }
+                    .padding(.horizontal, 4)
+                    .padding(.top, 4)
+                }
             }
         }
     }
@@ -109,17 +175,29 @@ struct TrackDetailView: View {
             VStack(spacing: 16) {
                 // 웨이브폼
                 WaveformView(player: player)
-                    .frame(height: 80)
+                    .frame(height: 150)
                     .clipShape(RoundedRectangle(cornerRadius: 12))
 
-                // 시간 표시
+                // 시간 표시 + 구간 안내
                 HStack {
                     Text(formatTime(player.currentTime))
                     Spacer()
                     if player.loopSectionEnabled {
-                        Text("핸들 드래그로 구간 설정")
-                            .font(.caption)
-                            .foregroundStyle(.tint)
+                        Button {
+                            player.loopSectionEnabled = false
+                        } label: {
+                            Label("구간 해제", systemImage: "xmark.circle.fill")
+                                .font(.caption)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 4)
+                                .background(Color.gray.opacity(0.30))
+                                .clipShape(Capsule())
+                        }
+                        .foregroundStyle(.secondary)
+                    } else {
+                        Text("웨이브폼을 드래그하여 구간 반복")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
                     }
                     Spacer()
                     Text(formatTime(player.duration))
@@ -134,11 +212,6 @@ struct TrackDetailView: View {
                 // 속도 조절
                 SpeedControlView(player: player)
 
-                // 반복 횟수
-                if player.loopSectionEnabled {
-                    LoopCountView(player: player)
-                }
-
                 // 스크립트
                 ScriptView(player: player, isVisible: $showScript)
 
@@ -148,8 +221,17 @@ struct TrackDetailView: View {
             .padding()
         }
         .background(Color(.systemGroupedBackground))
-        .navigationTitle(player.trackName)
+        .navigationTitle(trackIndex < player.playlist.count ? player.playlist[trackIndex].name : "")
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            player.selectTrack(at: trackIndex)
+        }
+        .onDisappear {
+            player.stopAndDeselect()
+        }
+        .onDisappear {
+            player.stop()
+        }
     }
 
     func formatTime(_ time: Double) -> String {
@@ -157,19 +239,22 @@ struct TrackDetailView: View {
     }
 }
 
-// MARK: - Playlist Item
-struct PlaylistItemView: View {
+// MARK: - Playlist Row
+struct PlaylistRowView: View {
     let track: TrackItem
     let index: Int
     let isPlaying: Bool
     let isCurrent: Bool
-    let onTap: () -> Void
-    let onDelete: () -> Void
+    var isSelected: Bool = false
 
     var body: some View {
         HStack(spacing: 12) {
             ZStack {
-                if isPlaying {
+                if isSelected {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 16))
+                        .foregroundStyle(.tint)
+                } else if isPlaying {
                     Image(systemName: "waveform")
                         .font(.system(size: 14))
                         .foregroundStyle(.tint)
@@ -192,21 +277,10 @@ struct PlaylistItemView: View {
             }
 
             Spacer()
-
-            Image(systemName: "chevron.right")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-
-            Button(role: .destructive) { onDelete() } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .foregroundStyle(.secondary)
-                    .font(.system(size: 16))
-            }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
         .contentShape(Rectangle())
-        .onTapGesture { onTap() }
     }
 
     func formatTime(_ t: Double) -> String {
@@ -217,70 +291,86 @@ struct PlaylistItemView: View {
 // MARK: - Waveform
 struct WaveformView: View {
     @ObservedObject var player: AudioPlayerModel
+    @State private var dragStart: Double?
 
     var body: some View {
         GeometryReader { geo in
+            let loopStartPct = player.duration > 0 ? player.loopStart / player.duration : 0
+            let loopEndPct = player.duration > 0 ? player.loopEnd / player.duration : 0
+
             ZStack(alignment: .leading) {
-                HStack(spacing: 2) {
-                    ForEach(0..<60, id: \.self) { i in
-                        let h = player.waveformData.isEmpty ? 0.3 :
-                            CGFloat(player.waveformData[min(i, player.waveformData.count - 1)])
-                        RoundedRectangle(cornerRadius: 2)
-                            .fill(Color.secondary.opacity(0.3))
-                            .frame(height: geo.size.height * max(0.1, h))
-                    }
-                }
-                .frame(maxHeight: .infinity, alignment: .center)
-
-                HStack(spacing: 2) {
-                    ForEach(0..<60, id: \.self) { i in
-                        let progress = player.duration > 0 ? player.currentTime / player.duration : 0
-                        let h = player.waveformData.isEmpty ? 0.3 :
-                            CGFloat(player.waveformData[min(i, player.waveformData.count - 1)])
-                        RoundedRectangle(cornerRadius: 2)
-                            .fill(Color.accentColor)
-                            .frame(height: geo.size.height * max(0.1, h))
-                            .opacity(Double(i) / 60.0 < progress ? 1.0 : 0.0)
-                    }
-                }
-                .frame(maxHeight: .infinity, alignment: .center)
-
+                // 구간 반복 배경 (회색 10%)
                 if player.loopSectionEnabled && player.duration > 0 {
-                    let sx = geo.size.width * CGFloat(player.loopStart / player.duration)
-                    let ex = geo.size.width * CGFloat(player.loopEnd / player.duration)
-
-                    Rectangle()
-                        .fill(Color.accentColor.opacity(0.15))
-                        .overlay(Rectangle().strokeBorder(Color.accentColor.opacity(0.5), lineWidth: 1))
-                        .frame(width: max(0, ex - sx))
-                        .offset(x: sx)
-
-                    Rectangle()
-                        .fill(Color.accentColor)
-                        .frame(width: 4)
-                        .offset(x: sx)
-                        .gesture(DragGesture(minimumDistance: 0).onChanged { v in
-                            let pct = max(0.0, min(Double(player.loopEnd / player.duration) - 0.02, Double(v.location.x / geo.size.width)))
-                            player.loopStart = pct * player.duration
-                        })
-
-                    Rectangle()
-                        .fill(Color.orange)
-                        .frame(width: 4)
-                        .offset(x: ex - 4)
-                        .gesture(DragGesture(minimumDistance: 0).onChanged { v in
-                            let pct = max(Double(player.loopStart / player.duration) + 0.02, min(1.0, Double(v.location.x / geo.size.width)))
-                            player.loopEnd = pct * player.duration
-                        })
+                    Color.gray.opacity(0.30)
+                        .frame(width: geo.size.width * CGFloat(loopEndPct - loopStartPct))
+                        .offset(x: geo.size.width * CGFloat(loopStartPct))
                 }
+
+                // 웨이브폼 바
+                HStack(spacing: 2) {
+                    ForEach(0..<60, id: \.self) { i in
+                        let barPos = Double(i) / 60.0
+                        let h = player.waveformData.isEmpty ? 0.3 :
+                            CGFloat(player.waveformData[min(i, player.waveformData.count - 1)])
+                        let progress = player.duration > 0 ? player.currentTime / player.duration : 0
+
+                        let isInLoop = player.loopSectionEnabled && player.duration > 0
+                        let inLoopRange = isInLoop && barPos >= loopStartPct && barPos < loopEndPct
+
+                        // 파란색: 구간 반복 시 구간 내 재생 위치까지 / 일반 재생 시 재생 위치까지
+                        let showBlue: Bool = isInLoop
+                            ? (inLoopRange && barPos < progress)
+                            : (barPos < progress)
+
+                        let barColor: Color = showBlue
+                            ? Color.accentColor
+                            : Color.secondary.opacity(0.3)
+
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(barColor)
+                            .frame(height: geo.size.height * max(0.1, h))
+                    }
+                }
+                .frame(maxHeight: .infinity, alignment: .center)
             }
             .background(Color(.secondarySystemGroupedBackground))
-            .gesture(DragGesture(minimumDistance: 0).onChanged { v in
-                if !player.loopSectionEnabled {
-                    let p = Double(v.location.x / geo.size.width)
-                    player.seek(to: p * player.duration)
-                }
-            })
+            .gesture(
+                DragGesture(minimumDistance: 10)
+                    .onChanged { v in
+                        guard player.duration > 0 else { return }
+                        let w = geo.size.width
+
+                        if dragStart == nil {
+                            // 드래그 시작 지점
+                            let pct = max(0, min(1, Double(v.startLocation.x / w)))
+                            dragStart = pct * player.duration
+                        }
+
+                        // 현재 드래그 위치
+                        let currentPct = max(0, min(1, Double(v.location.x / w)))
+                        let currentTime = currentPct * player.duration
+
+                        let start = min(dragStart!, currentTime)
+                        let end = max(dragStart!, currentTime)
+
+                        player.loopStart = start
+                        player.loopEnd = end
+                        player.loopSectionEnabled = true
+                    }
+                    .onEnded { _ in
+                        dragStart = nil
+                        // 구간 설정 후 해당 구간 시작점으로 이동 및 재생
+                        player.seek(to: player.loopStart)
+                        if !player.isPlaying { player.togglePlay() }
+                    }
+            )
+            .onTapGesture { location in
+                // 탭하면 해당 위치로 이동 (구간 반복 해제)
+                guard player.duration > 0 else { return }
+                let pct = Double(location.x / geo.size.width)
+                player.loopSectionEnabled = false
+                player.seek(to: pct * player.duration)
+            }
         }
     }
 }
@@ -291,9 +381,6 @@ struct PlaybackControlsView: View {
 
     var body: some View {
         HStack(spacing: 20) {
-            ctrlButton(icon: "repeat.1", label: "구간", active: player.loopSectionEnabled) {
-                player.loopSectionEnabled.toggle()
-            }
             Button { player.seek(to: player.currentTime - 5) } label: {
                 Image(systemName: "gobackward.5").font(.system(size: 22))
             }.foregroundStyle(.primary)
@@ -307,74 +394,23 @@ struct PlaybackControlsView: View {
             Button { player.seek(to: player.currentTime + 5) } label: {
                 Image(systemName: "goforward.5").font(.system(size: 22))
             }.foregroundStyle(.primary)
-
-            ctrlButton(icon: "repeat", label: "전체", active: player.loopAllEnabled) {
-                player.loopAllEnabled.toggle()
-            }
         }
-    }
-
-    @ViewBuilder
-    func ctrlButton(icon: String, label: String, active: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            VStack(spacing: 4) {
-                Image(systemName: icon).font(.system(size: 18))
-                Text(label).font(.caption2)
-            }
-            .foregroundStyle(active ? .white : .primary)
-            .frame(width: 56, height: 48)
-            .background(active ? Color.accentColor : Color(.secondarySystemGroupedBackground))
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-        }
-    }
-}
-
-// MARK: - Loop Count View
-struct LoopCountView: View {
-    @ObservedObject var player: AudioPlayerModel
-
-    var body: some View {
-        HStack {
-            Text("반복 횟수")
-                .font(.subheadline)
-                .fontWeight(.medium)
-            Spacer()
-            Slider(
-                value: Binding<Double>(
-                    get: { Double(player.loopCount) },
-                    set: { player.loopCount = Int($0) }
-                ),
-                in: 1...20,
-                step: 1
-            )
-            .frame(maxWidth: 160)
-            Text("\(player.loopCount)회")
-                .font(.subheadline)
-                .fontWeight(.semibold)
-                .foregroundStyle(.tint)
-                .frame(width: 36)
-        }
-        .padding(16)
-        .background(Color(.secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 }
 
 // MARK: - Speed Control
 struct SpeedControlView: View {
     @ObservedObject var player: AudioPlayerModel
-    let speeds: [Float] = [0.5, 0.75, 1.0, 1.25, 1.5]
+    let speeds: [Float] = [0.5, 0.75, 1.0, 1.5, 2.0]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(spacing: 10) {
             HStack {
                 Text("재생 속도").font(.subheadline).fontWeight(.medium)
                 Spacer()
                 Text(String(format: "%.2g×", player.playbackRate))
                     .font(.subheadline).fontWeight(.semibold).foregroundStyle(.tint)
             }
-            Slider(value: $player.playbackRate, in: 0.5...1.5, step: 0.05)
-                .onChange(of: player.playbackRate) { _, v in player.updatePlaybackRate(v) }
             HStack(spacing: 8) {
                 ForEach(speeds, id: \.self) { speed in
                     Button {
@@ -390,6 +426,7 @@ struct SpeedControlView: View {
                     }
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .center)
         }
         .padding(16)
         .background(Color(.secondarySystemGroupedBackground))
@@ -423,43 +460,66 @@ struct ScriptView: View {
                 }
                 .padding(.vertical, 8)
             } else if player.sentences.isEmpty {
-                Text("음성 분석 결과가 없습니다.")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .padding(.vertical, 8)
+                Button {
+                    if let url = player.audioURL {
+                        player.analyzeAudio(url: url)
+                    }
+                } label: {
+                    Label("음성 분석 시작", systemImage: "waveform.badge.magnifyingglass")
+                        .font(.subheadline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                }
+                .buttonStyle(.bordered)
+                .tint(.accentColor)
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
                         ForEach(player.sentences) { sentence in
+                            let isActive = player.loopSectionEnabled &&
+                                abs(player.loopStart - sentence.startTime) < 0.1 &&
+                                abs(player.loopEnd - sentence.endTime) < 0.1
+                            let isCurrentlyPlaying = player.currentTime >= sentence.startTime &&
+                                player.currentTime < sentence.endTime
+
                             Button {
-                                player.loopStart = sentence.startTime
-                                player.loopEnd = sentence.endTime
-                                player.loopSectionEnabled = true
-                                player.loopCount = 3
-                                player.seek(to: sentence.startTime)
-                                if !player.isPlaying { player.togglePlay() }
+                                if isActive {
+                                    // 이미 반복 중인 문장을 다시 누르면 해제
+                                    player.loopSectionEnabled = false
+                                } else {
+                                    player.loopStart = sentence.startTime
+                                    player.loopEnd = sentence.endTime
+                                    player.loopSectionEnabled = true
+                                    player.seek(to: sentence.startTime)
+                                    if !player.isPlaying { player.togglePlay() }
+                                }
                             } label: {
                                 HStack(alignment: .top, spacing: 10) {
-                                    Text(formatTime(sentence.startTime))
-                                        .font(.system(size: 11, weight: .medium))
-                                        .foregroundStyle(.tint)
-                                        .frame(width: 36)
-                                    Text(isVisible ? sentence.text : String(repeating: "■ ", count: max(1, sentence.text.count / 4)))
-                                        .font(.body)
-                                        .foregroundStyle(.primary)
-                                        .multilineTextAlignment(.leading)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                    Image(systemName: isActive ? "repeat.circle.fill" : "play.circle")
+                                        .font(.system(size: 16))
+                                        .foregroundStyle(isActive ? Color.accentColor : .secondary)
+                                        .frame(width: 24)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(isVisible ? sentence.text : String(repeating: "■ ", count: max(1, sentence.text.count / 4)))
+                                            .font(.subheadline)
+                                            .foregroundStyle(.primary)
+                                            .multilineTextAlignment(.leading)
+                                        Text(formatTime(sentence.startTime) + " - " + formatTime(sentence.endTime))
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
                                 }
                                 .padding(.vertical, 8)
                                 .padding(.horizontal, 10)
                                 .background(
-                                    player.currentTime >= sentence.startTime &&
-                                    player.currentTime < sentence.endTime
-                                    ? Color.accentColor.opacity(0.1) : Color.clear
+                                    isActive ? Color.accentColor.opacity(0.12) :
+                                    isCurrentlyPlaying ? Color.accentColor.opacity(0.05) : Color.clear
                                 )
                                 .cornerRadius(8)
                             }
                             .buttonStyle(.plain)
-                            Divider().padding(.leading, 46)
+                            Divider().padding(.leading, 44)
                         }
                     }
                 }
