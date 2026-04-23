@@ -102,10 +102,18 @@ class AudioPlayerModel: NSObject, ObservableObject {
 
     /// 트랙 선택만 (재생 안 함) — 탭 시 사용
     func selectTrack(at index: Int) {
-        guard index < playlist.count else { return }
-        if currentTrackIndex == index { return }
-        currentTrackIndex = index
-        loadAudio(url: playlist[index].url)
+        // 1. 인덱스 범위 확인 (가장 중요!)
+        guard index >= 0 && index < playlist.count else { return }
+        
+        let track = playlist[index]
+        self.currentTrackIndex = index
+        
+        // 2. 새로운 곡을 로드하기 전에 기존 상태 초기화
+        self.stop()
+        self.waveformData = [] // 혹은 초기값 세팅
+        
+        // 3. 오디오 로드 및 설정
+        loadAudio(url: track.url)
     }
 
     /// 트랙 선택 + 바로 재생 — 꾹 누르기 시 사용
@@ -194,6 +202,11 @@ class AudioPlayerModel: NSObject, ObservableObject {
     func loadAudio(url: URL) {
         stopPlayback()
         sentences = []
+
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            print("파일이 존재하지 않음: \(url.path)")
+            return
+        }
 
         do {
             try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
@@ -310,33 +323,38 @@ class AudioPlayerModel: NSObject, ObservableObject {
 
         SFSpeechRecognizer.requestAuthorization { [weak self] status in
             Task { @MainActor [weak self] in
-                guard status == .authorized, let self = self else {
-                    self?.isAnalyzing = false
+                guard let self = self else { return }
+
+                if status != .authorized {
+                    self.isAnalyzing = false
                     return
                 }
 
-                let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
+                guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US")), recognizer.isAvailable else {
+                    self.isAnalyzing = false
+                    return
+                }
+
                 let request = SFSpeechURLRecognitionRequest(url: url)
                 request.shouldReportPartialResults = false
 
-                recognizer?.recognitionTask(with: request) { [weak self] result, error in
+                recognizer.recognitionTask(with: request) { [weak self] result, error in
                     Task { @MainActor [weak self] in
                         guard let self = self else { return }
 
                         if let result = result, result.isFinal {
                             let segments = result.bestTranscription.segments
-                            // 세그먼트를 문장 단위로 묶기
                             var grouped: [SentenceSegment] = []
                             var words: [String] = []
                             var sentenceStart: Double = 0
 
-                            for seg in segments {
+                            for (i, seg) in segments.enumerated() {
                                 if words.isEmpty { sentenceStart = seg.timestamp }
                                 words.append(seg.substring)
 
                                 let isPunctuation = seg.substring.hasSuffix(".") ||
                                     seg.substring.hasSuffix("?") || seg.substring.hasSuffix("!")
-                                let isLast = seg === segments.last
+                                let isLast = i == segments.count - 1
 
                                 if isPunctuation || isLast {
                                     grouped.append(SentenceSegment(
@@ -410,12 +428,11 @@ class AudioPlayerModel: NSObject, ObservableObject {
 
 // MARK: - AVAudioPlayerDelegate
 extension AudioPlayerModel: AVAudioPlayerDelegate {
-    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
-        DispatchQueue.main.async {
+    nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        Task { @MainActor in
             self.stopTimer()
             self.isPlaying = false
             self.currentTime = 0
-            // 다음 트랙 자동 재생
             self.playNextTrack()
         }
     }
