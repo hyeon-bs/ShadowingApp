@@ -63,6 +63,8 @@ class AudioPlayerModel: NSObject, ObservableObject {
     private var recordingURLs: [URL] = []
     private var timer: Timer?
     private var currentLoopRepeat: Int = 0
+    private var speechRecognizer: SFSpeechRecognizer?
+    private var recognitionTask: SFSpeechRecognitionTask?
 
     // MARK: - Playlist 관리
     func addTrack(url: URL) {
@@ -320,6 +322,8 @@ class AudioPlayerModel: NSObject, ObservableObject {
         guard !isAnalyzing else { return }
         isAnalyzing = true
         sentences.removeAll()
+        recognitionTask?.cancel()
+        recognitionTask = nil
 
         SFSpeechRecognizer.requestAuthorization { [weak self] status in
             Task { @MainActor [weak self] in
@@ -330,52 +334,95 @@ class AudioPlayerModel: NSObject, ObservableObject {
                     return
                 }
 
-                guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US")), recognizer.isAvailable else {
+                let preferredLocaleId = Locale.preferredLanguages.first ?? "en-US"
+                let locale = Locale(identifier: preferredLocaleId)
+
+                guard let recognizer = SFSpeechRecognizer(locale: locale), recognizer.isAvailable else {
                     self.isAnalyzing = false
                     return
                 }
+                self.speechRecognizer = recognizer
 
                 let request = SFSpeechURLRecognitionRequest(url: url)
                 request.shouldReportPartialResults = false
 
-                recognizer.recognitionTask(with: request) { [weak self] result, error in
+                self.recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
                     Task { @MainActor [weak self] in
                         guard let self = self else { return }
 
                         if let result = result, result.isFinal {
-                            let segments = result.bestTranscription.segments
-                            var grouped: [SentenceSegment] = []
-                            var words: [String] = []
-                            var sentenceStart: Double = 0
-
-                            for (i, seg) in segments.enumerated() {
-                                if words.isEmpty { sentenceStart = seg.timestamp }
-                                words.append(seg.substring)
-
-                                let isPunctuation = seg.substring.hasSuffix(".") ||
-                                    seg.substring.hasSuffix("?") || seg.substring.hasSuffix("!")
-                                let isLast = i == segments.count - 1
-
-                                if isPunctuation || isLast {
-                                    grouped.append(SentenceSegment(
-                                        text: words.joined(separator: " "),
-                                        startTime: sentenceStart,
-                                        endTime: seg.timestamp + seg.duration + 0.3
-                                    ))
-                                    words = []
-                                }
-                            }
-
-                            self.sentences = grouped
+                            self.sentences = self.buildSentenceSegments(from: result)
                             self.isAnalyzing = false
+                            self.recognitionTask = nil
                         } else if let error = error {
                             print("분석 에러: \(error)")
                             self.isAnalyzing = false
+                            self.recognitionTask = nil
                         }
                     }
                 }
             }
         }
+    }
+
+    private func buildSentenceSegments(from result: SFSpeechRecognitionResult) -> [SentenceSegment] {
+        let segments = result.bestTranscription.segments
+        guard !segments.isEmpty else {
+            let fallbackText = result.bestTranscription.formattedString.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !fallbackText.isEmpty else { return [] }
+            return [SentenceSegment(
+                text: fallbackText,
+                startTime: 0,
+                endTime: max(duration, 0.5)
+            )]
+        }
+
+        var grouped: [SentenceSegment] = []
+        var words: [String] = []
+        var sentenceStart = segments[0].timestamp
+        var lastSegmentEnd = sentenceStart
+
+        let pauseThreshold = 0.7
+        let maxWordsPerSentence = 14
+
+        for (i, seg) in segments.enumerated() {
+            let currentStart = seg.timestamp
+            let currentEnd = seg.timestamp + seg.duration
+            let gap = currentStart - lastSegmentEnd
+            let isLast = i == segments.count - 1
+
+            if !words.isEmpty && gap >= pauseThreshold {
+                grouped.append(SentenceSegment(
+                    text: words.joined(separator: " "),
+                    startTime: sentenceStart,
+                    endTime: lastSegmentEnd + 0.2
+                ))
+                words.removeAll()
+                sentenceStart = currentStart
+            }
+
+            if words.isEmpty {
+                sentenceStart = currentStart
+            }
+            words.append(seg.substring)
+
+            let token = seg.substring.trimmingCharacters(in: .whitespacesAndNewlines)
+            let isPunctuation = token.hasSuffix(".") || token.hasSuffix("?") || token.hasSuffix("!")
+            let isLongChunk = words.count >= maxWordsPerSentence
+
+            if isPunctuation || isLongChunk || isLast {
+                grouped.append(SentenceSegment(
+                    text: words.joined(separator: " "),
+                    startTime: sentenceStart,
+                    endTime: currentEnd + 0.2
+                ))
+                words.removeAll()
+            }
+
+            lastSegmentEnd = currentEnd
+        }
+
+        return grouped
     }
 
     // MARK: - Recording

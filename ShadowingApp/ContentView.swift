@@ -21,24 +21,19 @@ struct ContentView: View {
                     .padding()
                 }
             }
-            .navigationTitle("쉐도잉")
-            .navigationBarTitleDisplayMode(.large)
+            .navigationTitle("쉐도잉 챌린지")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { showFilePicker = true } label: {
-                        Image(systemName: "plus.circle")
+                        Image(systemName: "plus.circle.fill")
+                            .font(.title3)
+                            .foregroundStyle(.green)
                     }
                 }
             }
-            .fileImporter(
-                isPresented: $showFilePicker,
-                allowedContentTypes: [.audio],
-                allowsMultipleSelection: true
-            ) { result in
+            .fileImporter(isPresented: $showFilePicker, allowedContentTypes: [.audio], allowsMultipleSelection: true) { result in
                 if case .success(let urls) = result {
-                    for url in urls {
-                        player.addTrack(url: url)
-                    }
+                    for url in urls { player.addTrack(url: url) }
                 }
             }
             .navigationDestination(for: Int.self) { index in
@@ -55,36 +50,44 @@ struct PlaylistView: View {
     var onTapTrack: (Int) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Text("재생 목록")
-                    .font(.subheadline)
-                    .fontWeight(.medium)
+                    .font(.system(.subheadline, design: .rounded))
+                    .fontWeight(.bold)
                 Spacer()
                 if isSelectionMode {
                     Button {
-                        player.stop()
                         player.selectedTrackIndices.removeAll()
-                        withAnimation {
+                        withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
                             isSelectionMode = false
                         }
                     } label: {
                         Text("취소")
-                            .font(.caption)
-                            .fontWeight(.medium)
+                            .font(.system(.caption, design: .rounded))
+                            .fontWeight(.semibold)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 5)
+                            .background(Color.green.opacity(0.15))
+                            .clipShape(Capsule())
                     }
                 }
             }
             .padding(.horizontal, 4)
 
             if player.playlist.isEmpty {
-                Text("+ 버튼을 눌러 파일을 추가해주세요")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.vertical, 12)
-                    .background(Color(.secondarySystemGroupedBackground))
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                VStack(spacing: 8) {
+                    Image(systemName: "music.note.list")
+                        .font(.system(size: 28))
+                        .foregroundStyle(.green.opacity(0.5))
+                    Text("+ 버튼을 눌러 파일을 추가해주세요")
+                        .font(.system(.caption, design: .rounded))
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.vertical, 24)
+                .background(Color(.secondarySystemGroupedBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
             } else {
                 VStack(spacing: 0) {
                     ForEach(Array(player.playlist.enumerated()), id: \.element.id) { index, track in
@@ -111,7 +114,7 @@ struct PlaylistView: View {
                             LongPressGesture(minimumDuration: 0.5)
                                 .onEnded { _ in
                                     if !isSelectionMode {
-                                        withAnimation {
+                                        withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
                                             isSelectionMode = true
                                             player.toggleTrackSelection(at: index)
                                         }
@@ -120,16 +123,16 @@ struct PlaylistView: View {
                         )
                         
                         if index < player.playlist.count - 1 {
-                            Divider().padding(.leading, 52)
+                            Divider().padding(.leading, 56)
                         }
                     }
                 }
                 .background(Color(.secondarySystemGroupedBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
 
                 // 선택 모드 하단 바
                 if isSelectionMode {
-                    HStack {
+                    HStack(spacing: 12) {
                         Button {
                             if player.selectedTrackIndices.count == player.playlist.count {
                                 player.selectedTrackIndices.removeAll()
@@ -138,21 +141,35 @@ struct PlaylistView: View {
                             }
                         } label: {
                             Text(player.selectedTrackIndices.count == player.playlist.count ? "전체해제" : "전체선택")
-                                .font(.subheadline)
-                                .foregroundStyle(.tint)
+                                .font(.system(.subheadline, design: .rounded))
+                                .fontWeight(.semibold)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 8)
+                                .background(Color.green.opacity(0.12))
+                                .foregroundStyle(.green)
+                                .clipShape(Capsule())
                         }
                         Spacer()
                         Button {
                             player.playSelectedTracks()
                         } label: {
-                            Text("반복재생")
-                                .font(.subheadline)
-                                .foregroundColor(player.selectedTrackIndices.isEmpty ? .secondary : .accentColor)
+                            HStack(spacing: 4) {
+                                Image(systemName: "repeat")
+                                    .font(.caption)
+                                Text("반복재생")
+                                    .font(.system(.subheadline, design: .rounded))
+                                    .fontWeight(.semibold)
+                            }
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(player.selectedTrackIndices.isEmpty ? Color.gray.opacity(0.12) : Color.green)
+                            .foregroundStyle(player.selectedTrackIndices.isEmpty ? .secondary : .white)
+                            .clipShape(Capsule())
                         }
                         .disabled(player.selectedTrackIndices.isEmpty)
                     }
                     .padding(.horizontal, 4)
-                    .padding(.top, 4)
+                    .padding(.top, 8)
                 }
             }
         }
@@ -166,74 +183,41 @@ struct TrackDetailView: View {
     @State private var showScript = true
 
     var body: some View {
-        ScrollView {
-            VStack(spacing: 16) {
-                // 웨이브폼
-                WaveformView(player: player)
-                    .frame(height: 150)
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
+        VStack {
+            if trackIndex >= 0 && trackIndex < player.playlist.count {
+                if player.duration > 0 {
+                    ScrollView {
+                        VStack(spacing: 20) {
+                            WaveformView(player: player)
+                                .frame(height: 120)
+                                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
 
-                // 시간 표시 + 구간 안내
-                HStack {
-                    Text(formatTime(player.currentTime))
-                    Spacer()
-                    if player.loopSectionEnabled {
-                        Button {
-                            player.loopSectionEnabled = false
-                        } label: {
-                            Label("구간 해제", systemImage: "xmark.circle.fill")
-                                .font(.caption)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 4)
-                                .background(Color.gray.opacity(0.30))
-                                .clipShape(Capsule())
+                            PlaybackControlsView(player: player)
+                            SpeedControlView(player: player)
+                            
+                            // 🔍 자동 분석된 문장 리스트가 보일 곳
+                            ScriptView(player: player, isVisible: $showScript)
                         }
-                        .foregroundStyle(.secondary)
-                    } else {
-                        Text("웨이브폼을 드래그하여 구간 반복")
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
+                        .padding()
                     }
-                    Spacer()
-                    Text(formatTime(player.duration))
+                } else {
+                    VStack(spacing: 12) {
+                        ProgressView()
+                            .tint(.green)
+                        Text("파일을 분석하고 있습니다...")
+                            .font(.system(.subheadline, design: .rounded))
+                            .foregroundStyle(.secondary)
+                    }
                 }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 4)
-
-                // 재생 컨트롤
-                PlaybackControlsView(player: player)
-
-                // 속도 조절
-                SpeedControlView(player: player)
-
-                // 스크립트
-                ScriptView(player: player, isVisible: $showScript)
-
-                // 녹음
-                RecordingView(player: player)
             }
-            .padding()
         }
-        .background(Color(.systemGroupedBackground))
         .navigationTitle(trackIndex < player.playlist.count ? player.playlist[trackIndex].name : "")
         .navigationBarTitleDisplayMode(.inline)
         .task {
-            // 인덱스가 현재 플레이리스트 범위 내에 있는지 확인 후 실행
-            if trackIndex < player.playlist.count {
-                try? await Task.sleep(nanoseconds: 200_000_000)
-                player.selectTrack(at: trackIndex)
-            } else {
-                print("⚠️ 오류: 유효하지 않은 트랙 인덱스(\(trackIndex))입니다.")
-            }
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            player.selectTrack(at: trackIndex)
         }
-        .onDisappear {
-            player.stopAndDeselect()
-        }
-    }
-
-    func formatTime(_ time: Double) -> String {
-        String(format: "%d:%02d", Int(time) / 60, Int(time) % 60)
+        .onDisappear { player.stopAndDeselect() }
     }
 }
 
@@ -249,35 +233,51 @@ struct PlaylistRowView: View {
         HStack(spacing: 12) {
             ZStack {
                 if isSelected {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 16))
-                        .foregroundStyle(.tint)
+                    Circle()
+                        .fill(Color.green)
+                        .frame(width: 30, height: 30)
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(.white)
                 } else if isPlaying {
+                    Circle()
+                        .fill(Color.green.opacity(0.15))
+                        .frame(width: 30, height: 30)
                     Image(systemName: "waveform")
-                        .font(.system(size: 14))
-                        .foregroundStyle(.tint)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.green)
                 } else {
+                    Circle()
+                        .fill(Color(.tertiarySystemGroupedBackground))
+                        .frame(width: 30, height: 30)
                     Text("\(index + 1)")
-                        .font(.caption)
-                        .foregroundStyle(isCurrent ? Color.accentColor : Color.secondary)
+                        .font(.system(.caption2, design: .rounded))
+                        .fontWeight(.bold)
+                        .foregroundStyle(isCurrent ? .green : .secondary)
                 }
             }
-            .frame(width: 24)
+            .frame(width: 30)
 
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(track.name)
-                    .font(.subheadline)
-                    .fontWeight(isCurrent ? .medium : .regular)
-                    .foregroundStyle(isCurrent ? Color.accentColor : Color.primary)
+                    .font(.system(.subheadline, design: .rounded))
+                    .fontWeight(isCurrent ? .semibold : .regular)
+                    .foregroundStyle(isCurrent ? .green : Color.primary)
                 Text(track.duration > 0 ? formatTime(track.duration) : "—")
-                    .font(.caption)
+                    .font(.system(.caption, design: .rounded))
                     .foregroundStyle(.secondary)
             }
 
             Spacer()
+
+            if isCurrent && !isSelected {
+                Circle()
+                    .fill(.green)
+                    .frame(width: 8, height: 8)
+            }
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.vertical, 12)
         .contentShape(Rectangle())
     }
 
@@ -293,46 +293,37 @@ struct WaveformView: View {
 
     var body: some View {
         GeometryReader { geo in
-            let loopStartPct = player.duration > 0 ? player.loopStart / player.duration : 0
-            let loopEndPct = player.duration > 0 ? player.loopEnd / player.duration : 0
+            let totalDuration = max(0.1, player.duration)
+            let loopStartPct = player.loopStart / totalDuration
+            let loopEndPct = player.loopEnd / totalDuration
 
             ZStack(alignment: .leading) {
-                // 구간 반복 배경 (회색 10%)
                 if player.loopSectionEnabled && player.duration > 0 {
-                    Color.gray.opacity(0.30)
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.green.opacity(0.15))
                         .frame(width: geo.size.width * CGFloat(loopEndPct - loopStartPct))
                         .offset(x: geo.size.width * CGFloat(loopStartPct))
                 }
 
-                // 웨이브폼 바
-                HStack(spacing: 2) {
+                HStack(spacing: 2.5) {
                     ForEach(0..<60, id: \.self) { i in
                         let barPos = Double(i) / 60.0
-                        // 데이터를 가져올 때 안전하게 옵셔널 바인딩 사용
+                        
                         let h: CGFloat = {
-                            if player.waveformData.count > i {
+                            if i < player.waveformData.count {
                                 return CGFloat(player.waveformData[i])
                             } else {
-                                return 0.3 // 기본 높이
+                                return 0.2
                             }
                         }()
-                            
-                        let progress = player.duration > 0 ? player.currentTime / player.duration : 0
-
-                        let isInLoop = player.loopSectionEnabled && player.duration > 0
+                        
+                        let progress = player.currentTime / totalDuration
+                        let isInLoop = player.loopSectionEnabled
                         let inLoopRange = isInLoop && barPos >= loopStartPct && barPos < loopEndPct
+                        let showGreen: Bool = isInLoop ? (inLoopRange && barPos < progress) : (barPos < progress)
 
-                        // 파란색: 구간 반복 시 구간 내 재생 위치까지 / 일반 재생 시 재생 위치까지
-                        let showBlue: Bool = isInLoop
-                            ? (inLoopRange && barPos < progress)
-                            : (barPos < progress)
-
-                        let barColor: Color = showBlue
-                            ? Color.accentColor
-                            : Color.secondary.opacity(0.3)
-
-                        RoundedRectangle(cornerRadius: 2)
-                            .fill(barColor)
+                        Capsule()
+                            .fill(showGreen ? Color.green : Color.secondary.opacity(0.25))
                             .frame(height: geo.size.height * max(0.1, h))
                     }
                 }
@@ -344,33 +335,23 @@ struct WaveformView: View {
                     .onChanged { v in
                         guard player.duration > 0 else { return }
                         let w = geo.size.width
-
                         if dragStart == nil {
-                            // 드래그 시작 지점
                             let pct = max(0, min(1, Double(v.startLocation.x / w)))
                             dragStart = pct * player.duration
                         }
-
-                        // 현재 드래그 위치
                         let currentPct = max(0, min(1, Double(v.location.x / w)))
                         let currentTime = currentPct * player.duration
-
-                        let start = min(dragStart!, currentTime)
-                        let end = max(dragStart!, currentTime)
-
-                        player.loopStart = start
-                        player.loopEnd = end
+                        player.loopStart = min(dragStart!, currentTime)
+                        player.loopEnd = max(dragStart!, currentTime)
                         player.loopSectionEnabled = true
                     }
                     .onEnded { _ in
                         dragStart = nil
-                        // 구간 설정 후 해당 구간 시작점으로 이동 및 재생
                         player.seek(to: player.loopStart)
                         if !player.isPlaying { player.togglePlay() }
                     }
             )
             .onTapGesture { location in
-                // 탭하면 해당 위치로 이동 (구간 반복 해제)
                 guard player.duration > 0 else { return }
                 let pct = Double(location.x / geo.size.width)
                 player.loopSectionEnabled = false
@@ -385,21 +366,36 @@ struct PlaybackControlsView: View {
     @ObservedObject var player: AudioPlayerModel
 
     var body: some View {
-        HStack(spacing: 20) {
+        HStack(spacing: 28) {
             Button { player.seek(to: player.currentTime - 5) } label: {
-                Image(systemName: "gobackward.5").font(.system(size: 22))
-            }.foregroundStyle(.primary)
+                Image(systemName: "gobackward.5")
+                    .font(.system(size: 24, weight: .medium))
+                    .foregroundStyle(.primary)
+                    .frame(width: 48, height: 48)
+                    .background(Color(.tertiarySystemGroupedBackground))
+                    .clipShape(Circle())
+            }
 
             Button { player.togglePlay() } label: {
-                Image(systemName: player.isPlaying ? "pause.circle.fill" : "play.circle.fill")
-                    .font(.system(size: 56))
-                    .foregroundStyle(Color.accentColor)
+                Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
+                    .font(.system(size: 26))
+                    .foregroundStyle(.white)
+                    .frame(width: 64, height: 64)
+                    .background(Color.green)
+                    .clipShape(Circle())
+                    .shadow(color: .green.opacity(0.3), radius: 8, y: 4)
             }
 
             Button { player.seek(to: player.currentTime + 5) } label: {
-                Image(systemName: "goforward.5").font(.system(size: 22))
-            }.foregroundStyle(.primary)
+                Image(systemName: "goforward.5")
+                    .font(.system(size: 24, weight: .medium))
+                    .foregroundStyle(.primary)
+                    .frame(width: 48, height: 48)
+                    .background(Color(.tertiarySystemGroupedBackground))
+                    .clipShape(Circle())
+            }
         }
+        .padding(.vertical, 8)
     }
 }
 
@@ -409,12 +405,16 @@ struct SpeedControlView: View {
     let speeds: [Float] = [0.5, 0.75, 1.0, 1.5, 2.0]
 
     var body: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 12) {
             HStack {
-                Text("재생 속도").font(.subheadline).fontWeight(.medium)
+                Text("재생 속도")
+                    .font(.system(.subheadline, design: .rounded))
+                    .fontWeight(.bold)
                 Spacer()
                 Text(String(format: "%.2g×", player.playbackRate))
-                    .font(.subheadline).fontWeight(.semibold).foregroundStyle(.tint)
+                    .font(.system(.subheadline, design: .rounded))
+                    .fontWeight(.bold)
+                    .foregroundStyle(.green)
             }
             HStack(spacing: 8) {
                 ForEach(speeds, id: \.self) { speed in
@@ -423,9 +423,11 @@ struct SpeedControlView: View {
                         player.updatePlaybackRate(speed)
                     } label: {
                         Text(String(format: "%.2g×", speed))
-                            .font(.caption).fontWeight(.medium)
-                            .padding(.horizontal, 10).padding(.vertical, 6)
-                            .background(abs(player.playbackRate - speed) < 0.01 ? Color.accentColor : Color(.tertiarySystemGroupedBackground))
+                            .font(.system(.caption, design: .rounded))
+                            .fontWeight(.bold)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(abs(player.playbackRate - speed) < 0.01 ? Color.green : Color(.tertiarySystemGroupedBackground))
                             .foregroundStyle(abs(player.playbackRate - speed) < 0.01 ? .white : .primary)
                             .clipShape(Capsule())
                     }
@@ -433,9 +435,9 @@ struct SpeedControlView: View {
             }
             .frame(maxWidth: .infinity, alignment: .center)
         }
-        .padding(16)
+        .padding(18)
         .background(Color(.secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
 }
 
@@ -445,89 +447,68 @@ struct ScriptView: View {
     @Binding var isVisible: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             // 1. 헤더 영역 (제목 & 토글 버튼)
             HStack {
                 Text("스크립트")
-                    .font(.subheadline)
-                    .fontWeight(.medium)
+                    .font(.system(.subheadline, design: .rounded))
+                    .fontWeight(.bold)
                 
                 Spacer()
                 
                 Button {
-                    withAnimation(.spring()) { isVisible.toggle() }
+                    withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) { isVisible.toggle() }
                 } label: {
                     Label(isVisible ? "숨기기" : "보이기",
                           systemImage: isVisible ? "eye.slash" : "eye")
-                        .font(.caption)
+                        .font(.system(.caption, design: .rounded))
+                        .fontWeight(.medium)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Color.green.opacity(0.12))
+                        .clipShape(Capsule())
                 }
             }
 
-            // 2. 메인 컨텐츠 영역
-            Group {
-                if player.isAnalyzing {
-                    // 분석 중일 때 보여줄 로딩 뷰
-                    VStack(spacing: 12) {
-                        ProgressView()
-                            .scaleEffect(1.2)
-                        Text("AI가 음성을 분석하여 텍스트를 추출하고 있어요...")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+            if player.isAnalyzing {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .tint(.green)
+                        .scaleEffect(0.8)
+                    Text("음성 분석 중...")
+                        .font(.system(.caption, design: .rounded))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 8)
+            } else if player.sentences.isEmpty {
+                Button {
+                    if let url = player.audioURL {
+                        player.analyzeAudio(url: url)
                     }
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 180)
-                    
-                } else if player.sentences.isEmpty {
-                    // 분석 결과가 없을 때 (혹은 파일이 없을 때)
-                    VStack(spacing: 8) {
-                        Image(systemName: "waveform.badge.exclamationmark")
-                            .font(.largeTitle)
-                            .foregroundStyle(.quaternary)
-                        Text("추출된 문장이 없습니다.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 180)
-                    
-                } else {
-                    // 3. 문장 리스트 (분석 완료)
-                    ScrollViewReader { proxy in // 현재 재생 문장으로 자동 스크롤을 위함
-                        ScrollView {
-                            VStack(alignment: .leading, spacing: 4) {
-                                ForEach(player.sentences) { sentence in
-                                    sentenceRow(sentence)
-                                        .id(sentence.id) // 자동 스크롤용 ID
-                                }
-                            }
-                        }
-                        .frame(maxHeight: 240)
-                        // 현재 재생 중인 문장으로 자동 스크롤 (선택 사항)
-                        .onChange(of: player.currentTime) { newValue in
-                            if let activeIndex = player.sentences.firstIndex(where: {
-                                newValue >= $0.startTime && newValue < $0.endTime
-                            }) {
-                                withAnimation {
-                                    // proxy.scrollTo(player.sentences[activeIndex].id, anchor: .center)
-                                }
-                            }
+                } label: {
+                    Label("음성 분석 시작", systemImage: "waveform.badge.magnifyingglass")
+                        .font(.system(.subheadline, design: .rounded))
+                        .fontWeight(.semibold)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .background(Color.green)
+                        .foregroundStyle(.white)
+                        .clipShape(Capsule())
+                }
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(player.sentences) { sentence in
+                            sentenceRow(sentence)
                         }
                     }
                 }
+                .frame(maxHeight: 240)
             }
         }
-        .padding(16)
+        .padding(18)
         .background(Color(.secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 16))
-        .shadow(color: .black.opacity(0.05), radius: 5, x: 0, y: 2)
-        // 4. 핵심: 뷰가 나타나자마자 자동 분석 실행
-        .onAppear {
-            autoStartAnalysis()
-        }
-        // 곡이 바뀌면 다시 분석
-        .onChange(of: player.audioURL) { _ in
-            autoStartAnalysis()
-        }
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
 
     // 개별 문장 행 뷰
@@ -545,13 +526,16 @@ struct ScriptView: View {
         } label: {
             HStack(alignment: .top, spacing: 12) {
                 // 상태 아이콘
-                Image(systemName: isActive ? "repeat.circle.fill" : (isCurrentlyPlaying ? "play.circle.fill" : "play.circle"))
-                    .font(.system(size: 18))
-                    .foregroundStyle(isActive || isCurrentlyPlaying ? Color.accentColor : .secondary)
-                    .frame(width: 24)
+                ZStack {
+                    Circle()
+                        .fill(isActive ? Color.green : (isCurrentlyPlaying ? Color.green.opacity(0.15) : Color(.tertiarySystemGroupedBackground)))
+                        .frame(width: 28, height: 28)
+                    Image(systemName: isActive ? "repeat" : (isCurrentlyPlaying ? "play.fill" : "play"))
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(isActive ? .white : (isCurrentlyPlaying ? .green : .secondary))
+                }
                 
                 VStack(alignment: .leading, spacing: 4) {
-                    // 텍스트 블라인드 처리 로직
                     Text(isVisible ? sentence.text : String(repeating: "● ", count: min(8, max(1, sentence.text.count / 3))))
                         .font(.system(.subheadline, design: .rounded))
                         .fontWeight(isCurrentlyPlaying ? .semibold : .regular)
@@ -568,25 +552,17 @@ struct ScriptView: View {
             .padding(.vertical, 10)
             .padding(.horizontal, 12)
             .background(
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(isActive ? Color.accentColor.opacity(0.15) :
-                          (isCurrentlyPlaying ? Color.accentColor.opacity(0.08) : Color.clear))
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(isActive ? Color.green.opacity(0.12) :
+                          (isCurrentlyPlaying ? Color.green.opacity(0.06) : Color.clear))
             )
         }
         .buttonStyle(.plain)
     }
 
-    // 자동 분석 실행 함수
-    private func autoStartAnalysis() {
-        if let url = player.audioURL, player.sentences.isEmpty {
-            player.analyzeAudio(url: url)
-        }
-    }
-
     // 문장 클릭 핸들러
     private func handleSentenceTap(_ sentence: SentenceSegment, isActive: Bool) {
         if isActive {
-            player.loopSectionEnabled = false
             player.loopSectionEnabled = false
         } else {
             player.loopStart = sentence.startTime
@@ -596,7 +572,6 @@ struct ScriptView: View {
             if !player.isPlaying { player.togglePlay() }
         }
         
-        // 탭했을 때 가벼운 진동 피드백
         let generator = UIImpactFeedbackGenerator(style: .light)
         generator.impactOccurred()
     }
@@ -620,15 +595,17 @@ struct RecordingView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("내 발음 녹음").font(.subheadline).fontWeight(.medium)
+            Text("내 발음 녹음")
+                .font(.system(.subheadline, design: .rounded))
+                .fontWeight(.bold)
             HStack(spacing: 12) {
                 Button { toggleRecording() } label: {
                     ZStack {
-                        Circle().strokeBorder(Color.red.opacity(0.6), lineWidth: 2).frame(width: 44, height: 44)
+                        Circle().strokeBorder(Color.red.opacity(0.6), lineWidth: 2).frame(width: 48, height: 48)
                         if isRecording {
-                            RoundedRectangle(cornerRadius: 4).fill(Color.red).frame(width: 16, height: 16)
+                            RoundedRectangle(cornerRadius: 5).fill(Color.red).frame(width: 16, height: 16)
                         } else {
-                            Circle().fill(Color.red).frame(width: 20, height: 20)
+                            Circle().fill(Color.red).frame(width: 22, height: 22)
                         }
                     }
                 }
@@ -636,10 +613,15 @@ struct RecordingView: View {
                     HStack(spacing: 6) {
                         Circle().fill(Color.red).frame(width: 8, height: 8)
                         Text(formatRecTime(recordingSeconds))
-                            .font(.subheadline).fontWeight(.medium).foregroundStyle(.red).monospacedDigit()
+                            .font(.system(.subheadline, design: .rounded))
+                            .fontWeight(.semibold)
+                            .foregroundStyle(.red)
+                            .monospacedDigit()
                     }
                 } else {
-                    Text("버튼을 눌러 녹음 시작").font(.subheadline).foregroundStyle(.secondary)
+                    Text("버튼을 눌러 녹음 시작")
+                        .font(.system(.subheadline, design: .rounded))
+                        .foregroundStyle(.secondary)
                 }
                 Spacer()
             }
@@ -647,25 +629,30 @@ struct RecordingView: View {
                 Divider()
                 ForEach(recordings.indices, id: \.self) { i in
                     HStack {
-                        Image(systemName: "waveform").foregroundStyle(.tint)
-                        Text("녹음 #\(i + 1)").font(.subheadline)
-                        Text("— \(recordings[i])").font(.subheadline).foregroundStyle(.secondary)
+                        Image(systemName: "waveform").foregroundStyle(.green)
+                        Text("녹음 #\(i + 1)")
+                            .font(.system(.subheadline, design: .rounded))
+                        Text("— \(recordings[i])")
+                            .font(.system(.subheadline, design: .rounded))
+                            .foregroundStyle(.secondary)
                         Spacer()
                         Button { player.playRecording(index: i) } label: {
                             Text("비교 재생")
-                                .font(.caption).fontWeight(.medium)
-                                .padding(.horizontal, 10).padding(.vertical, 5)
-                                .background(Color.accentColor.opacity(0.1))
-                                .foregroundStyle(.tint)
+                                .font(.system(.caption, design: .rounded))
+                                .fontWeight(.semibold)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .background(Color.green.opacity(0.12))
+                                .foregroundStyle(.green)
                                 .clipShape(Capsule())
                         }
                     }
                 }
             }
         }
-        .padding(16)
+        .padding(18)
         .background(Color(.secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
 
     func toggleRecording() {
