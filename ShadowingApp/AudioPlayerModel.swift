@@ -1,6 +1,5 @@
 import Foundation
 import AVFoundation
-import Speech
 import Combine
 
 // MARK: - Track Item
@@ -52,10 +51,6 @@ class AudioPlayerModel: NSObject, ObservableObject {
     @Published var loopEnd: Double = 10
     @Published var loopCount: Int = 3
 
-    // 스크립트
-    @Published var sentences: [SentenceSegment] = []
-    @Published var isAnalyzing: Bool = false
-
     // MARK: - Private
     private var player: AVAudioPlayer?
     private var recorder: AVAudioRecorder?
@@ -63,8 +58,6 @@ class AudioPlayerModel: NSObject, ObservableObject {
     private var recordingURLs: [URL] = []
     private var timer: Timer?
     private var currentLoopRepeat: Int = 0
-    private var speechRecognizer: SFSpeechRecognizer?
-    private var recognitionTask: SFSpeechRecognitionTask?
 
     // MARK: - Playlist 관리
     func addTrack(url: URL) {
@@ -110,10 +103,6 @@ class AudioPlayerModel: NSObject, ObservableObject {
         let track = playlist[index]
         self.currentTrackIndex = index
         
-        // 2. 새로운 곡을 로드하기 전에 기존 상태 초기화
-        self.stop()
-        self.waveformData = [] // 혹은 초기값 세팅
-        
         // 3. 오디오 로드 및 설정
         loadAudio(url: track.url)
     }
@@ -139,12 +128,12 @@ class AudioPlayerModel: NSObject, ObservableObject {
         stopPlayback()
         audioURL = nil
         currentTrackIndex = -1
-        sentences = []
         waveformData = []
     }
 
     private func stopPlayback() {
         player?.stop()
+        player = nil
         stopTimer()
         isPlaying = false
         currentTime = 0
@@ -203,7 +192,6 @@ class AudioPlayerModel: NSObject, ObservableObject {
     // MARK: - Load Audio
     func loadAudio(url: URL) {
         stopPlayback()
-        sentences = []
 
         guard FileManager.default.fileExists(atPath: url.path) else {
             print("파일이 존재하지 않음: \(url.path)")
@@ -261,15 +249,14 @@ class AudioPlayerModel: NSObject, ObservableObject {
     private func startTimer() {
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated {
-                guard let self = self, let player = self.player else { return }
+            guard let self else { return }
+            Task { @MainActor in
+                guard let player = self.player else { return }
                 self.currentTime = player.currentTime
 
                 // 구간 반복이 켜져 있으면 끝에 도달 시 시작점으로 되돌림 (무한 반복)
-                if self.loopSectionEnabled {
-                    if player.currentTime >= self.loopEnd {
-                        self.seek(to: self.loopStart)
-                    }
+                if self.loopSectionEnabled, player.currentTime >= self.loopEnd {
+                    self.seek(to: self.loopStart)
                 }
             }
         }
@@ -282,9 +269,12 @@ class AudioPlayerModel: NSObject, ObservableObject {
 
     // MARK: - Waveform
     private func generateWaveform(url: URL) {
-        Task {
+        Task.detached(priority: .utility) {
             let bars = await Self.computeWaveform(url: url)
-            self.waveformData = bars
+
+            await MainActor.run {
+                self.waveformData = bars
+            }
         }
     }
 
@@ -315,114 +305,6 @@ class AudioPlayerModel: NSObject, ObservableObject {
         } catch {
             return (0..<60).map { _ in Float.random(in: 0.2...1.0) }
         }
-    }
-
-    // MARK: - Speech Analysis
-    func analyzeAudio(url: URL) {
-        guard !isAnalyzing else { return }
-        isAnalyzing = true
-        sentences.removeAll()
-        recognitionTask?.cancel()
-        recognitionTask = nil
-
-        SFSpeechRecognizer.requestAuthorization { [weak self] status in
-            Task { @MainActor [weak self] in
-                guard let self = self else { return }
-
-                if status != .authorized {
-                    self.isAnalyzing = false
-                    return
-                }
-
-                let preferredLocaleId = Locale.preferredLanguages.first ?? "en-US"
-                let locale = Locale(identifier: preferredLocaleId)
-
-                guard let recognizer = SFSpeechRecognizer(locale: locale), recognizer.isAvailable else {
-                    self.isAnalyzing = false
-                    return
-                }
-                self.speechRecognizer = recognizer
-
-                let request = SFSpeechURLRecognitionRequest(url: url)
-                request.shouldReportPartialResults = false
-
-                self.recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
-                    Task { @MainActor [weak self] in
-                        guard let self = self else { return }
-
-                        if let result = result, result.isFinal {
-                            self.sentences = self.buildSentenceSegments(from: result)
-                            self.isAnalyzing = false
-                            self.recognitionTask = nil
-                        } else if let error = error {
-                            print("분석 에러: \(error)")
-                            self.isAnalyzing = false
-                            self.recognitionTask = nil
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private func buildSentenceSegments(from result: SFSpeechRecognitionResult) -> [SentenceSegment] {
-        let segments = result.bestTranscription.segments
-        guard !segments.isEmpty else {
-            let fallbackText = result.bestTranscription.formattedString.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !fallbackText.isEmpty else { return [] }
-            return [SentenceSegment(
-                text: fallbackText,
-                startTime: 0,
-                endTime: max(duration, 0.5)
-            )]
-        }
-
-        var grouped: [SentenceSegment] = []
-        var words: [String] = []
-        var sentenceStart = segments[0].timestamp
-        var lastSegmentEnd = sentenceStart
-
-        let pauseThreshold = 0.7
-        let maxWordsPerSentence = 14
-
-        for (i, seg) in segments.enumerated() {
-            let currentStart = seg.timestamp
-            let currentEnd = seg.timestamp + seg.duration
-            let gap = currentStart - lastSegmentEnd
-            let isLast = i == segments.count - 1
-
-            if !words.isEmpty && gap >= pauseThreshold {
-                grouped.append(SentenceSegment(
-                    text: words.joined(separator: " "),
-                    startTime: sentenceStart,
-                    endTime: lastSegmentEnd + 0.2
-                ))
-                words.removeAll()
-                sentenceStart = currentStart
-            }
-
-            if words.isEmpty {
-                sentenceStart = currentStart
-            }
-            words.append(seg.substring)
-
-            let token = seg.substring.trimmingCharacters(in: .whitespacesAndNewlines)
-            let isPunctuation = token.hasSuffix(".") || token.hasSuffix("?") || token.hasSuffix("!")
-            let isLongChunk = words.count >= maxWordsPerSentence
-
-            if isPunctuation || isLongChunk || isLast {
-                grouped.append(SentenceSegment(
-                    text: words.joined(separator: " "),
-                    startTime: sentenceStart,
-                    endTime: currentEnd + 0.2
-                ))
-                words.removeAll()
-            }
-
-            lastSegmentEnd = currentEnd
-        }
-
-        return grouped
     }
 
     // MARK: - Recording

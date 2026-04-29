@@ -4,7 +4,8 @@ import UniformTypeIdentifiers
 
 // MARK: - Content View (목록 화면)
 struct ContentView: View {
-    @StateObject private var player = AudioPlayerModel()
+    @StateObject var player = AudioPlayerModel()
+    @StateObject var analyzer = ScriptAnalyzer()
     @State private var showFilePicker = false
     @State private var navigationPath = NavigationPath()
 
@@ -37,7 +38,11 @@ struct ContentView: View {
                 }
             }
             .navigationDestination(for: Int.self) { index in
-                TrackDetailView(player: player, trackIndex: index)
+                TrackDetailView(
+                    player: player,
+                    analyzer: analyzer,
+                    trackIndex: index
+                )
             }
         }
     }
@@ -163,7 +168,9 @@ struct PlaylistView: View {
                             .padding(.horizontal, 14)
                             .padding(.vertical, 8)
                             .background(player.selectedTrackIndices.isEmpty ? Color.gray.opacity(0.12) : Color.green)
-                            .foregroundStyle(player.selectedTrackIndices.isEmpty ? .secondary : .white)
+                            .foregroundColor(
+                                player.selectedTrackIndices.isEmpty ? .secondary : .white
+                            )
                             .clipShape(Capsule())
                         }
                         .disabled(player.selectedTrackIndices.isEmpty)
@@ -179,6 +186,7 @@ struct PlaylistView: View {
 // MARK: - Track Detail View (상세/재생 화면)
 struct TrackDetailView: View {
     @ObservedObject var player: AudioPlayerModel
+    @ObservedObject var analyzer: ScriptAnalyzer
     let trackIndex: Int
     @State private var showScript = true
 
@@ -188,15 +196,17 @@ struct TrackDetailView: View {
                 if player.duration > 0 {
                     ScrollView {
                         VStack(spacing: 20) {
-                            WaveformView(player: player)
+                            WaveformView(
+                                player: player,
+                                analyzer: analyzer
+                            )
                                 .frame(height: 120)
                                 .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
 
                             PlaybackControlsView(player: player)
                             SpeedControlView(player: player)
                             
-                            // 🔍 자동 분석된 문장 리스트가 보일 곳
-                            ScriptView(player: player, isVisible: $showScript)
+                            ScriptView(player: player, analyzer: analyzer)
                         }
                         .padding()
                     }
@@ -289,6 +299,7 @@ struct PlaylistRowView: View {
 // MARK: - Waveform
 struct WaveformView: View {
     @ObservedObject var player: AudioPlayerModel
+    @ObservedObject var analyzer: ScriptAnalyzer
     @State private var dragStart: Double?
 
     var body: some View {
@@ -444,7 +455,8 @@ struct SpeedControlView: View {
 // MARK: - Script View
 struct ScriptView: View {
     @ObservedObject var player: AudioPlayerModel
-    @Binding var isVisible: Bool
+    @ObservedObject var analyzer: ScriptAnalyzer
+    @State private var isVisible = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -470,7 +482,7 @@ struct ScriptView: View {
                 }
             }
 
-            if player.isAnalyzing {
+            if analyzer.isAnalyzing {
                 HStack(spacing: 8) {
                     ProgressView()
                         .tint(.green)
@@ -480,10 +492,13 @@ struct ScriptView: View {
                         .foregroundStyle(.secondary)
                 }
                 .padding(.vertical, 8)
-            } else if player.sentences.isEmpty {
+            } else if analyzer.sentences.isEmpty {
                 Button {
                     if let url = player.audioURL {
-                        player.analyzeAudio(url: url)
+                        analyzer.analyze(
+                            url: url,
+                            duration: player.duration
+                        )
                     }
                 } label: {
                     Label("음성 분석 시작", systemImage: "waveform.badge.magnifyingglass")
@@ -498,7 +513,7 @@ struct ScriptView: View {
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 6) {
-                        ForEach(player.sentences) { sentence in
+                        ForEach(analyzer.sentences) { sentence in
                             sentenceRow(sentence)
                         }
                     }
