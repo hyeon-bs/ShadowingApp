@@ -55,6 +55,7 @@ class AudioPlayerModel: NSObject, ObservableObject {
     // 스크립트
     @Published var sentences: [SentenceSegment] = []
     @Published var isAnalyzing: Bool = false
+    @Published var analysisTimedOut: Bool = false
 
     // MARK: - Private
     private var player: AVAudioPlayer?
@@ -65,6 +66,10 @@ class AudioPlayerModel: NSObject, ObservableObject {
     private var currentLoopRepeat: Int = 0
     private var speechRecognizer: SFSpeechRecognizer?
     private var recognitionTask: SFSpeechRecognitionTask?
+    private var analysisTimeoutTask: Task<Void, Never>?
+    private var analysisTask: Task<Void, Never>?
+    private var waveformTask: Task<Void, Never>?
+    private var analysisGeneration = UUID()
 
     // MARK: - Playlist 관리
     func addTrack(url: URL) {
@@ -136,15 +141,19 @@ class AudioPlayerModel: NSObject, ObservableObject {
 
     /// 트랙 선택 해제 + 정지
     func stopAndDeselect() {
+        cancelAnalysis(resetFlags: true)
+
         stopPlayback()
         audioURL = nil
         currentTrackIndex = -1
         sentences = []
+        analysisTimedOut = false
         waveformData = []
     }
 
     private func stopPlayback() {
         player?.stop()
+        player = nil
         stopTimer()
         isPlaying = false
         currentTime = 0
@@ -204,6 +213,7 @@ class AudioPlayerModel: NSObject, ObservableObject {
     func loadAudio(url: URL) {
         stopPlayback()
         sentences = []
+        cancelAnalysis(resetFlags: true)
 
         guard FileManager.default.fileExists(atPath: url.path) else {
             print("파일이 존재하지 않음: \(url.path)")
@@ -227,6 +237,12 @@ class AudioPlayerModel: NSObject, ObservableObject {
             currentTime = 0
 
             generateWaveform(url: url)
+            
+            // 재생 우선 → 분석은 2초 뒤 백그라운드 시작
+            Task(priority: .background) { [weak self] in
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                self?.autoAnalyzeCurrentTrackIfNeeded()
+            }
         } catch {
             print("오디오 로드 실패: \(error)")
         }
@@ -260,16 +276,24 @@ class AudioPlayerModel: NSObject, ObservableObject {
     // MARK: - Timer
     private func startTimer() {
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated {
+        timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
                 guard let self = self, let player = self.player else { return }
                 self.currentTime = player.currentTime
 
-                // 구간 반복이 켜져 있으면 끝에 도달 시 시작점으로 되돌림 (무한 반복)
-                if self.loopSectionEnabled {
-                    if player.currentTime >= self.loopEnd {
-                        self.seek(to: self.loopStart)
-                    }
+                if self.loopSectionEnabled,
+                   player.currentTime >= self.loopEnd {
+
+                    self.seek(to: self.loopStart)
+                }
+                else if !self.loopSectionEnabled,
+                        let sentence = self.currentSentence(),
+                        player.currentTime >= sentence.endTime {
+
+                    self.loopStart = sentence.startTime
+                    self.loopEnd = sentence.endTime
+                    self.loopSectionEnabled = true
+                    self.seek(to: sentence.startTime)
                 }
             }
         }
@@ -282,8 +306,16 @@ class AudioPlayerModel: NSObject, ObservableObject {
 
     // MARK: - Waveform
     private func generateWaveform(url: URL) {
-        Task {
+        waveformTask?.cancel()
+        waveformTask = nil
+
+        waveformData = Array(repeating: 0.15, count: 60)
+
+        waveformTask = Task {
             let bars = await Self.computeWaveform(url: url)
+
+            guard !Task.isCancelled else { return }
+
             self.waveformData = bars
         }
     }
@@ -292,7 +324,13 @@ class AudioPlayerModel: NSObject, ObservableObject {
         do {
             let file = try AVAudioFile(forReading: url)
             let format = file.processingFormat
-            let frameCount = AVAudioFrameCount(file.length)
+            // Prevent overflow/traps with very long files or malformed headers.
+            let safeMaxFrames: AVAudioFrameCount = 1_000_000
+            let rawLength = max(Int64(0), file.length)
+            let frameCount = AVAudioFrameCount(min(Int64(safeMaxFrames), rawLength))
+            guard frameCount > 0 else {
+                return Array(repeating: 0.2, count: 60)
+            }
             guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else {
                 return (0..<60).map { _ in Float.random(in: 0.2...1.0) }
             }
@@ -306,9 +344,14 @@ class AudioPlayerModel: NSObject, ObservableObject {
             for i in 0..<60 {
                 let start = i * samplesPerBar
                 let end = min(start + samplesPerBar, frameLength)
+                if start >= frameLength || end <= start {
+                    bars.append(0)
+                    continue
+                }
                 var sum: Float = 0
                 for j in start..<end { sum += abs(channelData[j]) }
-                bars.append(sum / Float(end - start))
+                let count = max(1, end - start)
+                bars.append(sum / Float(count))
             }
             let maxVal = bars.max() ?? 1.0
             return maxVal > 0 ? bars.map { $0 / maxVal } : bars
@@ -318,46 +361,113 @@ class AudioPlayerModel: NSObject, ObservableObject {
     }
 
     // MARK: - Speech Analysis
-    func analyzeAudio(url: URL) {
-        guard !isAnalyzing else { return }
-        isAnalyzing = true
-        sentences.removeAll()
+    private func cancelAnalysis(resetFlags: Bool) {
+        analysisGeneration = UUID()
         recognitionTask?.cancel()
         recognitionTask = nil
 
+        analysisTimeoutTask?.cancel()
+        analysisTimeoutTask = nil
+
+        analysisTask?.cancel()
+        analysisTask = nil
+
+        speechRecognizer = nil
+
+        if resetFlags {
+            isAnalyzing = false
+            analysisTimedOut = false
+        }
+    }
+    
+    func analyzeAudio(url: URL) {
+        cancelAnalysis(resetFlags: false)
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        guard duration > 0 else { return }
+        guard audioURL == url else { return }
+        let generation = UUID()
+        analysisGeneration = generation
+        
+        isAnalyzing = true
+        analysisTimedOut = false
+        sentences.removeAll()
+        
+        analysisTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 60 * 1_000_000_000)
+            guard let self = self, !Task.isCancelled else { return }
+            
+            await MainActor.run {
+                guard self.analysisGeneration == generation else { return }
+                guard self.audioURL == url else { return }
+                if self.isAnalyzing {
+                    self.cancelAnalysis(resetFlags: false)
+                    self.isAnalyzing = false
+                    self.analysisTimedOut = true
+                }
+            }
+        }
+        
         SFSpeechRecognizer.requestAuthorization { [weak self] status in
             Task { @MainActor [weak self] in
                 guard let self = self else { return }
+                guard self.analysisGeneration == generation else { return }
+                guard self.audioURL == url else { return }
 
-                if status != .authorized {
+                guard status == .authorized else {
+                    self.cancelAnalysis(resetFlags: false)
                     self.isAnalyzing = false
                     return
                 }
 
-                let preferredLocaleId = Locale.preferredLanguages.first ?? "en-US"
-                let locale = Locale(identifier: preferredLocaleId)
-
-                guard let recognizer = SFSpeechRecognizer(locale: locale), recognizer.isAvailable else {
+                let localeID = Locale.preferredLanguages.first ?? "en-US"
+                let recognizer = SFSpeechRecognizer(locale: Locale(identifier: localeID))
+                guard let recognizer = recognizer, recognizer.isAvailable else {
+                    self.cancelAnalysis(resetFlags: false)
                     self.isAnalyzing = false
                     return
                 }
+                
                 self.speechRecognizer = recognizer
-
                 let request = SFSpeechURLRecognitionRequest(url: url)
-                request.shouldReportPartialResults = false
-
+                request.shouldReportPartialResults = false // 중간 결과 제외 (부하 감소)
+                
+                // 작업 시작
                 self.recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
-                    Task { @MainActor [weak self] in
-                        guard let self = self else { return }
-
-                        if let result = result, result.isFinal {
-                            self.sentences = self.buildSentenceSegments(from: result)
+                    guard let self = self else { return }
+                    if let error = error {
+                        Task { @MainActor [weak self] in
+                            guard let self = self else { return }
+                            guard self.analysisGeneration == generation else { return }
+                            guard self.audioURL == url else { return }
+                            print("인식 에러: \(error.localizedDescription)")
+                            self.cancelAnalysis(resetFlags: false)
                             self.isAnalyzing = false
-                            self.recognitionTask = nil
-                        } else if let error = error {
-                            print("분석 에러: \(error)")
+                        }
+                        return
+                    }
+                    
+                    guard let result = result, result.isFinal else { return }
+                    let rawSegments = result.bestTranscription.segments.map {
+                        SegmentDTO(text: $0.substring, timestamp: $0.timestamp, duration: $0.duration)
+                    }
+                    let fallbackText = result.bestTranscription.formattedString
+                    let totalDuration = self.duration
+                    
+                    self.analysisTask?.cancel()
+                    self.analysisTask = Task.detached(priority: .background) {
+                        let newSentences = Self.buildSentenceSegments(
+                            segments: rawSegments,
+                            fallbackText: fallbackText,
+                            totalDuration: totalDuration
+                        )
+                        await MainActor.run { [weak self] in
+                            guard let self = self else { return }
+                            guard self.analysisGeneration == generation else { return }
+                            guard self.audioURL == url else { return }
+                            self.sentences = newSentences
+                            self.cancelAnalysis(resetFlags: false)
                             self.isAnalyzing = false
-                            self.recognitionTask = nil
+                            self.analysisTimedOut = false
                         }
                     }
                 }
@@ -365,15 +475,41 @@ class AudioPlayerModel: NSObject, ObservableObject {
         }
     }
 
-    private func buildSentenceSegments(from result: SFSpeechRecognitionResult) -> [SentenceSegment] {
-        let segments = result.bestTranscription.segments
+    func autoAnalyzeCurrentTrackIfNeeded() {
+        guard !isAnalyzing else { return }
+        guard sentences.isEmpty else { return }
+        guard let url = audioURL else { return }
+        guard currentTrackIndex >= 0 else { return }
+        guard duration > 0 else { return }
+
+        analyzeAudio(url: url)
+    }
+    
+    func currentSentence() -> SentenceSegment? {
+        sentences.first {
+            currentTime >= $0.startTime &&
+            currentTime < $0.endTime
+        }
+    }
+
+    private struct SegmentDTO {
+        let text: String
+        let timestamp: Double
+        let duration: Double
+    }
+
+    private nonisolated static func buildSentenceSegments(
+        segments: [SegmentDTO],
+        fallbackText: String,
+        totalDuration: Double
+    ) -> [SentenceSegment] {
         guard !segments.isEmpty else {
-            let fallbackText = result.bestTranscription.formattedString.trimmingCharacters(in: .whitespacesAndNewlines)
+            let fallbackText = fallbackText.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !fallbackText.isEmpty else { return [] }
             return [SentenceSegment(
                 text: fallbackText,
                 startTime: 0,
-                endTime: max(duration, 0.5)
+                endTime: max(totalDuration, 0.5)
             )]
         }
 
@@ -404,9 +540,9 @@ class AudioPlayerModel: NSObject, ObservableObject {
             if words.isEmpty {
                 sentenceStart = currentStart
             }
-            words.append(seg.substring)
+            words.append(seg.text)
 
-            let token = seg.substring.trimmingCharacters(in: .whitespacesAndNewlines)
+            let token = seg.text.trimmingCharacters(in: .whitespacesAndNewlines)
             let isPunctuation = token.hasSuffix(".") || token.hasSuffix("?") || token.hasSuffix("!")
             let isLongChunk = words.count >= maxWordsPerSentence
 
@@ -425,52 +561,52 @@ class AudioPlayerModel: NSObject, ObservableObject {
         return grouped
     }
 
-    // MARK: - Recording
-    func startRecording() {
-        Task {
-            let granted = await AVAudioApplication.requestRecordPermission()
-            guard granted else { return }
-            do {
-                let session = AVAudioSession.sharedInstance()
-                try session.setCategory(.playAndRecord, mode: .default, options: .defaultToSpeaker)
-                try session.setActive(true)
-                let url = FileManager.default.temporaryDirectory
-                    .appendingPathComponent("rec_\(Date().timeIntervalSince1970).m4a")
-                let settings: [String: Any] = [
-                    AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
-                    AVSampleRateKey: 44100,
-                    AVNumberOfChannelsKey: 1,
-                    AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue
-                ]
-                self.recorder = try AVAudioRecorder(url: url, settings: settings)
-                self.recorder?.record()
-                self.recordingURLs.append(url)
-            } catch {
-                print("녹음 실패: \(error)")
-            }
-        }
-    }
-
-    func stopRecording() {
-        recorder?.stop()
-        recorder = nil
-        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
-    }
-
-    func playRecording(index: Int) {
-        guard index < recordingURLs.count else { return }
-        do {
-            let p = try AVAudioPlayer(contentsOf: recordingURLs[index])
-            p.play()
-            if recordingPlayers.count > index {
-                recordingPlayers[index] = p
-            } else {
-                recordingPlayers.append(p)
-            }
-        } catch {
-            print("녹음 재생 실패: \(error)")
-        }
-    }
+//    // MARK: - Recording
+//    func startRecording() {
+//        Task {
+//            let granted = await AVAudioApplication.requestRecordPermission()
+//            guard granted else { return }
+//            do {
+//                let session = AVAudioSession.sharedInstance()
+//                try session.setCategory(.playAndRecord, mode: .default, options: .defaultToSpeaker)
+//                try session.setActive(true)
+//                let url = FileManager.default.temporaryDirectory
+//                    .appendingPathComponent("rec_\(Date().timeIntervalSince1970).m4a")
+//                let settings: [String: Any] = [
+//                    AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
+//                    AVSampleRateKey: 44100,
+//                    AVNumberOfChannelsKey: 1,
+//                    AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue
+//                ]
+//                self.recorder = try AVAudioRecorder(url: url, settings: settings)
+//                self.recorder?.record()
+//                self.recordingURLs.append(url)
+//            } catch {
+//                print(generateWaveform, "녹음 실패: \(error)")
+//            }
+//        }
+//    }
+//
+//    func stopRecording() {
+//        recorder?.stop()
+//        recorder = nil
+//        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
+//    }
+//
+//    func playRecording(index: Int) {
+//        guard index < recordingURLs.count else { return }
+//        do {
+//            let p = try AVAudioPlayer(contentsOf: recordingURLs[index])
+//            p.play()
+//            if recordingPlayers.count > index {
+//                recordingPlayers[index] = p
+//            } else {
+//                recordingPlayers.append(p)
+//            }
+//        } catch {
+//            print("녹음 재생 실패: \(error)")
+//        }
+//    }
 }
 
 // MARK: - AVAudioPlayerDelegate
