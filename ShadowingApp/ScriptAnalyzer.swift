@@ -8,11 +8,190 @@ final class ScriptAnalyzer: ObservableObject {
     @Published var sentences: [SentenceSegment] = []
     @Published var isAnalyzing = false
     @Published var failed = false
+    @Published var isRangeEditing = false
+    @Published var editingSentenceID: UUID?
 
     private var recognitionTask: SFSpeechRecognitionTask?
 
+    func reset() {
+        recognitionTask?.cancel()
+        recognitionTask = nil
+        isAnalyzing = false
+        failed = false
+        isRangeEditing = false
+        editingSentenceID = nil
+        sentences.removeAll()
+    }
+
+    func splitSentence(at index: Int, splitTime: Double) {
+        guard sentences.indices.contains(index) else { return }
+        let current = sentences[index]
+        let minChunk: Double = 0.25
+        guard splitTime > current.startTime + minChunk, splitTime < current.endTime - minChunk else { return }
+
+        let words = current.text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "[.!?]+$", with: "", options: .regularExpression)
+            .split(separator: " ")
+            .map(String.init)
+
+        guard words.count >= 2 else { return }
+
+        let ratio = (splitTime - current.startTime) / max(0.001, current.endTime - current.startTime)
+        let rawCut = Int((Double(words.count) * ratio).rounded())
+        let cutIndex = max(1, min(words.count - 1, rawCut))
+
+        let leftText = normalizeSentenceText(words[..<cutIndex].joined(separator: " "))
+        let rightText = normalizeSentenceText(words[cutIndex...].joined(separator: " "))
+
+        let left = SentenceSegment(text: leftText, startTime: current.startTime, endTime: splitTime)
+        let right = SentenceSegment(text: rightText, startTime: splitTime, endTime: current.endTime)
+
+        sentences[index] = left
+        sentences.insert(right, at: index + 1)
+    }
+
+    func mergeWithNext(at index: Int) {
+        guard sentences.indices.contains(index), sentences.indices.contains(index + 1) else { return }
+        let first = sentences[index]
+        let second = sentences[index + 1]
+
+        let mergedText = normalizeSentenceText(
+            first.text.replacingOccurrences(of: "[.!?]+$", with: "", options: .regularExpression)
+            + " "
+            + second.text
+        )
+
+        let merged = SentenceSegment(
+            text: mergedText,
+            startTime: first.startTime,
+            endTime: second.endTime
+        )
+
+        sentences[index] = merged
+        sentences.remove(at: index + 1)
+    }
+
+    func updateSentenceText(at index: Int, newText: String) {
+        guard sentences.indices.contains(index) else { return }
+        let normalized = normalizeSentenceText(newText)
+        guard !normalized.isEmpty else { return }
+        let current = sentences[index]
+        sentences[index] = SentenceSegment(
+            text: normalized,
+            startTime: current.startTime,
+            endTime: current.endTime
+        )
+    }
+
+    func addSentence(at time: Double, defaultDuration: Double = 1.5) {
+        let start = max(0, time)
+        let end = start + defaultDuration
+        let newSegment = SentenceSegment(text: "New sentence.", startTime: start, endTime: end)
+
+        if let index = sentenceIndex(containing: start) {
+            sentences.insert(newSegment, at: index + 1)
+        } else if let index = sentences.firstIndex(where: { $0.startTime > start }) {
+            sentences.insert(newSegment, at: index)
+        } else {
+            sentences.append(newSegment)
+        }
+    }
+
+    func insertSentence(before index: Int, defaultDuration: Double = 1.0) {
+        guard sentences.indices.contains(index) else { return }
+        let anchor = sentences[index]
+        let end = max(0, anchor.startTime)
+        let start = max(0, end - defaultDuration)
+        let segment = SentenceSegment(text: "New sentence.", startTime: start, endTime: end)
+        sentences.insert(segment, at: index)
+    }
+
+    func insertSentence(after index: Int, defaultDuration: Double = 1.0) {
+        guard sentences.indices.contains(index) else { return }
+        let anchor = sentences[index]
+        let start = anchor.endTime
+        let end = start + defaultDuration
+        let segment = SentenceSegment(text: "New sentence.", startTime: start, endTime: end)
+        sentences.insert(segment, at: index + 1)
+    }
+
+    func updateSentenceStart(at index: Int, newStart: Double) {
+        guard sentences.indices.contains(index) else { return }
+        let current = sentences[index]
+        let minimumDuration: Double = 0.25
+        var adjusted = newStart
+
+        if index > 0 {
+            adjusted = max(adjusted, sentences[index - 1].endTime)
+        } else {
+            adjusted = max(0, adjusted)
+        }
+        adjusted = min(adjusted, current.endTime - minimumDuration)
+
+        guard adjusted != current.startTime else { return }
+
+        sentences[index] = SentenceSegment(
+            text: current.text,
+            startTime: adjusted,
+            endTime: current.endTime
+        )
+    }
+
+    func updateSentenceEnd(at index: Int, newEnd: Double) {
+        guard sentences.indices.contains(index) else { return }
+        let current = sentences[index]
+        let minimumDuration: Double = 0.25
+        var adjusted = newEnd
+
+        if index < sentences.count - 1 {
+            adjusted = min(adjusted, sentences[index + 1].startTime)
+        }
+        adjusted = max(adjusted, current.startTime + minimumDuration)
+
+        guard adjusted != current.endTime else { return }
+
+        sentences[index] = SentenceSegment(
+            text: current.text,
+            startTime: current.startTime,
+            endTime: adjusted
+        )
+    }
+
+    func sentenceIndex(containing time: Double) -> Int? {
+        sentences.firstIndex { segment in
+            time >= segment.startTime && time <= segment.endTime
+        }
+    }
+
+    func updateSentenceRange(at index: Int, start: Double, end: Double) {
+        guard sentences.indices.contains(index) else { return }
+        let minimumDuration: Double = 0.25
+        var newStart = min(start, end)
+        var newEnd = max(start, end)
+
+        if index > 0 {
+            newStart = max(newStart, sentences[index - 1].endTime)
+        } else {
+            newStart = max(0, newStart)
+        }
+
+        if index < sentences.count - 1 {
+            newEnd = min(newEnd, sentences[index + 1].startTime)
+        }
+
+        guard newEnd - newStart >= minimumDuration else { return }
+
+        let current = sentences[index]
+        sentences[index] = SentenceSegment(text: current.text, startTime: newStart, endTime: newEnd)
+    }
+
     func analyze(url: URL, duration: Double) {
         guard !isAnalyzing else { return }
+        guard url.isFileURL, FileManager.default.fileExists(atPath: url.path) else {
+            failed = true
+            return
+        }
 
         isAnalyzing = true
         failed = false
@@ -21,44 +200,113 @@ final class ScriptAnalyzer: ObservableObject {
         recognitionTask?.cancel()
         recognitionTask = nil
 
-        SFSpeechRecognizer.requestAuthorization { status in
-            Task { @MainActor in
-                guard status == .authorized else {
-                    self.isAnalyzing = false
-                    self.failed = true
-                    return
-                }
+        let startRecognition: () -> Void = {
+            guard let recognizer = self.makeAvailableRecognizer() else {
+                self.isAnalyzing = false
+                self.failed = true
+                return
+            }
 
-                let localeID = Locale.preferredLanguages.first ?? "en-US"
-                guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: localeID)), recognizer.isAvailable else {
-                    self.isAnalyzing = false
-                    self.failed = true
-                    return
-                }
+            let request = SFSpeechURLRecognitionRequest(url: url)
+            request.shouldReportPartialResults = false
 
-                let request = SFSpeechURLRecognitionRequest(url: url)
-                request.shouldReportPartialResults = false
+            self.recognitionTask = recognizer.recognitionTask(with: request) { result, error in
+                Task { @MainActor in
+                    if let error {
+                        print("Speech recognition error: \(error.localizedDescription)")
+                        self.isAnalyzing = false
+                        self.failed = true
+                        self.recognitionTask = nil
+                        return
+                    }
 
-                self.recognitionTask = recognizer.recognitionTask(with: request) { result, error in
-                    Task { @MainActor in
-                        if let error {
-                            print("Speech recognition error: \(error.localizedDescription)")
-                            self.isAnalyzing = false
-                            self.failed = true
-                            self.recognitionTask = nil
-                            return
+                    if let result, result.isFinal {
+                        let built = self.makeSentences(from: result, duration: duration)
+                        self.sentences = built.map { segment in
+                            SentenceSegment(
+                                text: self.normalizeSentenceText(segment.text),
+                                startTime: segment.startTime,
+                                endTime: segment.endTime
+                            )
                         }
-
-                        if let result, result.isFinal {
-                            self.sentences = self.makeSentences(from: result, duration: duration)
-                            self.isAnalyzing = false
-                            self.failed = false
-                            self.recognitionTask = nil
-                        }
+                        self.isAnalyzing = false
+                        self.failed = built.isEmpty
+                        self.recognitionTask = nil
                     }
                 }
             }
         }
+
+        switch SFSpeechRecognizer.authorizationStatus() {
+        case .authorized:
+            startRecognition()
+        case .notDetermined:
+            SFSpeechRecognizer.requestAuthorization { status in
+                Task { @MainActor in
+                    guard status == .authorized else {
+                        self.isAnalyzing = false
+                        self.failed = true
+                        return
+                    }
+                    startRecognition()
+                }
+            }
+        default:
+            isAnalyzing = false
+            failed = true
+        }
+    }
+
+    private func makeAvailableRecognizer() -> SFSpeechRecognizer? {
+        // 영어 학습 모드: 인식 언어를 en-US로 고정
+        guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US")) else {
+            return nil
+        }
+        return recognizer.isAvailable ? recognizer : nil
+    }
+
+    private func normalizeSentenceText(_ input: String) -> String {
+        var text = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return text }
+
+        // 자주 발생하는 축약형 인식 오류 보정
+        let replacements: [String: String] = [
+            " i ": " I ",
+            " im ": " I'm ",
+            " ive ": " I've ",
+            " dont ": " don't ",
+            " doesnt ": " doesn't ",
+            " didnt ": " didn't ",
+            " cant ": " can't ",
+            " wont ": " won't ",
+            " thats ": " that's ",
+            " whats ": " what's ",
+            " theres ": " there's ",
+            " were ": " we're ",
+            " youre ": " you're "
+        ]
+
+        // 단어 경계 보정을 위해 앞뒤 공백 패딩
+        text = " \(text) "
+        for (wrong, corrected) in replacements {
+            text = text.replacingOccurrences(of: wrong, with: corrected, options: [.caseInsensitive])
+        }
+
+        // 다중 공백 정리
+        text = text.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // 첫 글자 대문자 처리
+        if let first = text.first {
+            text.replaceSubrange(text.startIndex...text.startIndex, with: String(first).uppercased())
+        }
+
+        // 문장부호가 없으면 마침표 추가
+        if let last = text.last, !".!?".contains(last) {
+            text += "."
+        }
+
+        return text
     }
 
     private func makeSentences(
