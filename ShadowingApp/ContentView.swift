@@ -158,6 +158,30 @@ struct PlaylistView: View {
                                 .foregroundStyle(.green)
                                 .clipShape(Capsule())
                         }
+                        
+                        Button(role: .destructive) {
+                            // Delete selected tracks from playlist
+                            let indices = player.selectedTrackIndices.sorted(by: >)
+                            for i in indices {
+                                if i >= 0 && i < player.playlist.count {
+                                    player.playlist.remove(at: i)
+                                }
+                            }
+                            player.selectedTrackIndices.removeAll()
+                            withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
+                                isSelectionMode = false
+                            }
+                        } label: {
+                            Text("삭제")
+                                .font(.system(.subheadline, design: .rounded))
+                                .fontWeight(.semibold)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 8)
+                                .background(Color.red.opacity(0.12))
+                                .foregroundStyle(.red)
+                                .clipShape(Capsule())
+                        }
+                        
                         Spacer()
                         Button {
                             player.playSelectedTracks()
@@ -553,51 +577,74 @@ struct ScriptView: View {
             }
             
             
-            if analyzer.isAnalyzing {
-                HStack(spacing: 8) {
-                    ProgressView()
-                        .tint(.green)
-                        .scaleEffect(0.8)
-                    Text("음성 분석 중...")
-                        .font(.system(.caption, design: .rounded))
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.vertical, 8)
-            } else if analyzer.sentences.isEmpty {
-                Button {
-                    if let url = player.audioURL {
-                        analyzer.analyze(
-                            url: url,
-                            duration: player.duration
-                        )
+            if analyzer.sentences.isEmpty {
+                if analyzer.isAnalyzing {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .tint(.green)
+                            .scaleEffect(0.8)
+                        Text("음성 분석 중...")
+                            .font(.system(.caption, design: .rounded))
+                            .foregroundStyle(.secondary)
                     }
-                } label: {
-                    Label("음성 분석 시작", systemImage: "waveform.badge.magnifyingglass")
-                        .font(.system(.subheadline, design: .rounded))
-                        .fontWeight(.semibold)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                        .background(player.audioURL == nil ? Color.gray.opacity(0.35) : Color.green)
-                        .foregroundStyle(.white)
-                        .clipShape(Capsule())
+                    .padding(.vertical, 8)
+                } else {
+                    Button {
+                        if let url = player.audioURL {
+                            analyzer.analyze(
+                                url: url,
+                                duration: player.duration
+                            )
+                        }
+                    } label: {
+                        Label("음성 분석 시작", systemImage: "waveform.badge.magnifyingglass")
+                            .font(.system(.subheadline, design: .rounded))
+                            .fontWeight(.semibold)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(player.audioURL == nil ? Color.gray.opacity(0.35) : Color.green)
+                            .foregroundStyle(.white)
+                            .clipShape(Capsule())
+                    }
+                    .disabled(player.audioURL == nil)
                 }
-                .disabled(player.audioURL == nil)
             } else {
                 ZStack {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 2) {
-                            ForEach(Array(analyzer.sentences.enumerated()), id: \.element.id) { index, sentence in
+                    List {
+                        ForEach(Array(analyzer.sentences.enumerated()), id: \.element.id) { index, sentence in
+                            HStack(spacing: 8) {
+                                if isEditingMode {
+                                    Image(systemName: "line.3.horizontal")
+                                        .foregroundStyle(.secondary)
+                                }
                                 sentenceRow(sentence, index: index)
+                                    .contentShape(Rectangle())
                             }
+                            .listRowInsets(EdgeInsets())
+                            .listRowSeparator(.hidden)
+                        }
+                        .onMove { source, destination in
+                            analyzer.sentences.move(fromOffsets: source, toOffset: destination)
                         }
                     }
+                    .listStyle(.plain)
+                    .environment(\.editMode, .constant(isEditingMode ? .active : .inactive))
                     .frame(maxHeight: 240)
-                    .background(Color.clear.contentShape(Rectangle()).onTapGesture {
-                        if isEditingMode { isEditingMode = false }
-                    })
-                    
+
+                    if analyzer.isAnalyzing {
+                        VisualEffectBlur()
+                            .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                            .allowsHitTesting(true)
+                        VStack(spacing: 8) {
+                            ProgressView()
+                                .tint(.green)
+                            Text("음성 분석 중...")
+                                .font(.system(.caption, design: .rounded))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
                     if !isVisible {
-                        // Blur overlay layer
                         VisualEffectBlur()
                             .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
                             .allowsHitTesting(true)
@@ -781,11 +828,13 @@ struct ScriptView: View {
         .simultaneousGesture(
             LongPressGesture(minimumDuration: 0.35)
                 .onEnded { _ in
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                        // Open quick edit sheet
-                        quickEditSentenceID = sentence.id
-                        quickEditText = sentence.text
-                        showQuickEdit = true
+                    // 편집 모드일 때만 롱프레스 편집 허용
+                    if isEditingMode {
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                            quickEditSentenceID = sentence.id
+                            quickEditText = sentence.text
+                            showQuickEdit = true
+                        }
                     }
                 }
         )
@@ -805,6 +854,16 @@ struct ScriptView: View {
             player.loopEnd = sentence.endTime
             player.startSectionRepeat(repeatCount: 9999)
         }
+        .overlay(
+            Group {
+                if isEditingMode {
+                    Image(systemName: "line.3.horizontal")
+                        .foregroundStyle(.secondary)
+                        .padding(.trailing, 8)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                }
+            }
+        )
     }
     
     private func formatTime(_ t: Double) -> String {
