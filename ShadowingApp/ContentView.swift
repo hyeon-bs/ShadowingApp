@@ -367,14 +367,10 @@ struct WaveformView: View {
                 .frame(maxHeight: .infinity, alignment: .center)
                 
                 if player.duration > 0 {
-                    let loopColor: Color = .green
+                    // let loopColor: Color = .green
                     
-                    let dotHeight = max(18, geo.size.height - 20)
-                    let dotCount = max(4, Int(dotHeight / 8))
-                    
-                    // Removed A handle UI block
-                    
-                    // Removed B handle UI block
+                    // let dotHeight = max(18, geo.size.height - 20)
+                    // let dotCount = max(4, Int(dotHeight / 8))
                 }
             }
             .background(Color(.secondarySystemGroupedBackground))
@@ -502,40 +498,60 @@ struct ScriptView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             // 1. 헤더 영역 (제목 & 토글 버튼)
-            HStack {
+            HStack(spacing: 12) {
                 Text("스크립트")
                     .font(.system(.subheadline, design: .rounded))
                     .fontWeight(.bold)
                 
-                Spacer()
-                
+                // 보이기 / 숨기기 버튼 (항상 노출)
                 Button {
-                    // 새 문장 삽입: 현재 재생 위치 기준 기본 범위 2초
-                    let start = max(0, player.currentTime)
-                    let end = min(player.duration, start + 2.0)
-                    let new = SentenceSegment(text: "새 문장", startTime: start, endTime: end)
-                    analyzer.sentences.append(new)
+                    withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
+                        isVisible.toggle()
+                    }
                 } label: {
-                    Image(systemName: "plus.circle.fill")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(.green)
+                    Image(systemName: isVisible ? "eye.slash" : "eye")
+                        .symbolRenderingMode(.palette) // 🎨 뼈대와 포인트를 다른 색으로 줄 때
+                        .foregroundStyle(.gray)  // 슬래시는 빨강, 눈은 회색
+                        .font(.system(.caption, design: .rounded))
+                        .fontWeight(.light)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 5)
+                        //.background(Color.gray.opacity(0.12))
+                        .clipShape(Capsule())
                 }
                 
-                HStack(spacing: 8) {
-                    Button {
-                        withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) { isVisible.toggle() }
-                    } label: {
-                        Label(isVisible ? "숨기기" : "보이기",
-                              systemImage: isVisible ? "eye.slash" : "eye")
+                Spacer()
+        
+                // 편집 토글 버튼 (우측 상단)
+                Button {
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                        isEditingMode.toggle()
+                    }
+                } label: {
+                    Text(isEditingMode ? "완료" : "편집")
                         .font(.system(.caption, design: .rounded))
-                        .fontWeight(.medium)
+                        .fontWeight(.light)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 5)
-                        .background(Color.green.opacity(0.12))
+                        .background(isEditingMode ? Color.green : Color.primary.opacity(0.06))
+                        .foregroundColor(isEditingMode ? .white : .primary)
                         .clipShape(Capsule())
+                }
+                // 편집 중일 때만 노출되는 행 추가 버튼
+                if isEditingMode {
+                    Button {
+                        let start = max(0, player.currentTime)
+                        let end = min(player.duration, start + 2.0)
+                        let new = SentenceSegment(text: "새 문장", startTime: start, endTime: end)
+                        withAnimation { analyzer.sentences.append(new) }
+                    } label: {
+                        Image(systemName: "plus.circle.fill")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(.green)
                     }
                 }
             }
+            
             
             if analyzer.isAnalyzing {
                 HStack(spacing: 8) {
@@ -576,7 +592,10 @@ struct ScriptView: View {
                         }
                     }
                     .frame(maxHeight: 240)
-
+                    .background(Color.clear.contentShape(Rectangle()).onTapGesture {
+                        if isEditingMode { isEditingMode = false }
+                    })
+                    
                     if !isVisible {
                         // Blur overlay layer
                         VisualEffectBlur()
@@ -602,7 +621,7 @@ struct ScriptView: View {
                         let height = geo.size.height
                         let barSpacing: CGFloat = 2
                         let barWidth = max(1, (width - CGFloat(count - 1) * barSpacing) / CGFloat(count))
-
+                        
                         // Compute current sentence range in pixels
                         let (a, b): (Double, Double) = {
                             if let id = quickEditSentenceID, let idx = analyzer.sentences.firstIndex(where: { $0.id == id }) {
@@ -615,7 +634,7 @@ struct ScriptView: View {
                         let bX = CGFloat(b / total) * width
                         let rangeMinX = min(aX, bX)
                         let rangeMaxX = max(aX, bX)
-
+                        
                         ZStack(alignment: .leading) {
                             // Bars
                             HStack(spacing: barSpacing) {
@@ -692,7 +711,10 @@ struct ScriptView: View {
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .topBarLeading) {
-                        Button("취소") { showQuickEdit = false }
+                        Button(action: { showQuickEdit = false }) {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 13, weight: .bold))
+                        }
                     }
                     ToolbarItem(placement: .topBarTrailing) {
                         Button(role: .destructive) {
@@ -714,64 +736,21 @@ struct ScriptView: View {
         player.currentTime < sentence.endTime
         
         HStack(alignment: .top, spacing: 12) {
-            Button {
-                if isEditingMode {
-                    popupSentenceID = sentence.id
-                    popupText = sentence.text
-                    popupStartText = String(format: "%.2f", sentence.startTime)
-                    popupEndText = String(format: "%.2f", sentence.endTime)
-                    showEditSheet = true
+            Group {
+                if isCurrentlyPlaying {
+                    Image(systemName: "play.fill")
+                        .font(.system(size: 12))
+                        .foregroundColor(.green)
+                        .padding(.top, 4)
                 } else {
-                    player.loopSectionEnabled = false
-                    player.seek(to: sentence.startTime)
-                    if !player.isPlaying { player.togglePlay() }
-                }
-            } label: {
-                ZStack {
-                    Circle()
-                        .fill(isEditingMode ? Color.green.opacity(0.15) : Color(.tertiarySystemGroupedBackground))
-                        .frame(width: 28, height: 28)
-                    Image(systemName: isCurrentlyPlaying ? "play.fill" : "play")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(isEditingMode ? .green : .secondary)
+                    // 01, 02, 03 형태로 포맷팅된 번호
+                    Text(String(format: "%02d", index + 1))
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundColor(Color.primary.opacity(0.3))
                 }
             }
-            .buttonStyle(.plain)
-            .contextMenu {
-                Button("위로 이동") {
-                    if let i = analyzer.sentences.firstIndex(where: { $0.id == sentence.id }), i > 0 {
-                        withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
-                            let moved = analyzer.sentences.remove(at: i)
-                            analyzer.sentences.insert(moved, at: i - 1)
-                        }
-                    }
-                }
-                Button("아래로 이동") {
-                    if let i = analyzer.sentences.firstIndex(where: { $0.id == sentence.id }), i < analyzer.sentences.count - 1 {
-                        withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
-                            let moved = analyzer.sentences.remove(at: i)
-                            analyzer.sentences.insert(moved, at: i + 1)
-                        }
-                    }
-                }
-                Button(role: .destructive) {
-                    if let idx = analyzer.sentences.firstIndex(where: { $0.id == sentence.id }) {
-                        analyzer.sentences.remove(at: idx)
-                    }
-                } label: { Label("삭제", systemImage: "trash") }
-            }
-            .onDrag {
-                draggedSentenceID = sentence.id
-                let provider = NSItemProvider(object: sentence.id.uuidString as NSString)
-                provider.suggestedName = sentence.text
-                return provider
-            }
-            .onDrop(of: [.text, .sentenceReorder], delegate: SentenceDropDelegate(
-                targetID: sentence.id,
-                sentences: $analyzer.sentences,
-                draggedID: $draggedSentenceID,
-                isEnabled: !analyzer.isAnalyzing
-            ))
+            .frame(width: 24, alignment: .leading)
+            // Spacer().frame(width: 0)
             
             VStack(alignment: .leading, spacing: 4) {
                 Text(sentence.text)
@@ -788,23 +767,44 @@ struct ScriptView: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
         }
         .padding(.vertical, 10)
         .padding(.horizontal, 12)
         .background(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color.clear)
+                .fill((player.loopSectionEnabled &&
+                       player.currentTime >= sentence.startTime &&
+                       player.currentTime < sentence.endTime)
+                      ? Color.green.opacity(0.18) : Color.clear)
         )
         .contentShape(Rectangle())
-        .highPriorityGesture(
+        .simultaneousGesture(
             LongPressGesture(minimumDuration: 0.35)
                 .onEnded { _ in
-                    quickEditSentenceID = sentence.id
-                    quickEditText = sentence.text
-                    showQuickEdit = true
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                        // Open quick edit sheet
+                        quickEditSentenceID = sentence.id
+                        quickEditText = sentence.text
+                        showQuickEdit = true
+                    }
                 }
         )
+        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+            Button(role: .destructive) {
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                    if let idx = analyzer.sentences.firstIndex(where: { $0.id == sentence.id }) {
+                        analyzer.sentences.remove(at: idx)
+                    }
+                }
+            } label: {
+                Label("삭제", systemImage: "trash")
+            }
+        }
+        .onTapGesture {
+            player.loopStart = sentence.startTime
+            player.loopEnd = sentence.endTime
+            player.startSectionRepeat(repeatCount: 9999)
+        }
     }
     
     private func formatTime(_ t: Double) -> String {

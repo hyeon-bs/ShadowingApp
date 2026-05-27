@@ -6,17 +6,27 @@
 	objectVersion = 77;
 	objects = {
 
-/* Begin PBXBuildFile section */
-/* End PBXBuildFile section */
-
 /* Begin PBXFileReference section */
 		D94F09B12FA1FC5D00406C43 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		D9F5F30F2F6D2CD300E1937B /* ShadowingApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ShadowingApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		D961BDFD2FC5F072001C6A87 /* Exceptions for "ShadowingApp" folder in "ShadowingApp" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = D9F5F30E2F6D2CD300E1937B /* ShadowingApp */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		D9F5F3112F6D2CD300E1937B /* ShadowingApp */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				D961BDFD2FC5F072001C6A87 /* Exceptions for "ShadowingApp" folder in "ShadowingApp" target */,
+			);
 			path = ShadowingApp;
 			sourceTree = "<group>";
 		};
@@ -259,6 +269,7 @@
 				DEVELOPMENT_TEAM = 8Q6TBKHQD5;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = ShadowingApp/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "녹음 기능을 사용하기 위해 마이크 접근이 필요합니다.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "음성을 텍스트로 변환하기 위해 음성 인식 접근이 필요합니다.";
@@ -294,6 +305,7 @@
 				DEVELOPMENT_TEAM = 8Q6TBKHQD5;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = ShadowingApp/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "녹음 기능을 사용하기 위해 마이크 접근이 필요합니다.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "음성을 텍스트로 변환하기 위해 음성 인식 접근이 필요합니다.";
