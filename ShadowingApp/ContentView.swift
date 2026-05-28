@@ -222,40 +222,38 @@ struct TrackDetailView: View {
         VStack {
             if trackIndex >= 0 && trackIndex < player.playlist.count {
                 if player.duration > 0 {
-                    ScrollView {
-                        VStack(spacing: 20) {
-                            WaveformView(
-                                player: player,
-                                analyzer: analyzer
-                            )
-                            .frame(height: 108)
-                            .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-                            
-                            if player.loopSectionEnabled && player.isWaveformLoopSelection && !analyzer.isRangeEditing {
-                                HStack {
-                                    Spacer()
-                                    Button("구간 취소") {
-                                        player.loopSectionEnabled = false
-                                        player.isWaveformLoopSelection = false
-                                    }
-                                    .font(.system(.caption, design: .rounded))
-                                    .fontWeight(.semibold)
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 7)
-                                    .background(Color.green.opacity(0.14))
-                                    .foregroundStyle(.green)
-                                    .clipShape(Capsule())
-                                    Spacer()
+                    VStack(spacing: 20) {
+                        WaveformView(
+                            player: player,
+                            analyzer: analyzer
+                        )
+                        .frame(height: 108)
+                        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                        
+                        if player.loopSectionEnabled && player.isWaveformLoopSelection && !analyzer.isRangeEditing {
+                            HStack {
+                                Spacer()
+                                Button("구간 취소") {
+                                    player.loopSectionEnabled = false
+                                    player.isWaveformLoopSelection = false
                                 }
+                                .font(.system(.caption, design: .rounded))
+                                .fontWeight(.semibold)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 7)
+                                .background(Color.green.opacity(0.14))
+                                .foregroundStyle(.green)
+                                .clipShape(Capsule())
+                                Spacer()
                             }
-                            
-                            PlaybackControlsView(player: player)
-                            SpeedControlView(player: player)
-                            
-                            ScriptView(player: player, analyzer: analyzer)
                         }
-                        .padding()
+                        
+                        PlaybackControlsView(player: player)
+                        SpeedControlView(player: player)
+                        
+                        ScriptView(player: player, analyzer: analyzer)
                     }
+                    .padding()
                 } else {
                     VStack(spacing: 12) {
                         ProgressView()
@@ -270,7 +268,9 @@ struct TrackDetailView: View {
         .navigationTitle(trackIndex < player.playlist.count ? player.playlist[trackIndex].name : "")
         .navigationBarTitleDisplayMode(.inline)
         .task {
-            analyzer.reset()
+            if analyzer.sentences.isEmpty {
+                    analyzer.reset()
+            }
             try? await Task.sleep(nanoseconds: 200_000_000)
             player.selectTrack(at: trackIndex)
         }
@@ -519,6 +519,8 @@ struct ScriptView: View {
     @State private var quickEditSentenceID: UUID?
     @State private var quickEditText: String = ""
     
+    @State private var editMode: EditMode = .inactive
+    
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             // 1. 헤더 영역 (제목 & 토글 버튼)
@@ -550,6 +552,7 @@ struct ScriptView: View {
                 Button {
                     withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                         isEditingMode.toggle()
+                        editMode = isEditingMode ? .active : .inactive
                     }
                 } label: {
                     Text(isEditingMode ? "완료" : "편집")
@@ -589,6 +592,11 @@ struct ScriptView: View {
                     }
                     .padding(.vertical, 8)
                 } else {
+                    if analyzer.failed {
+                        Text("인식 실패. 다시 시도해주세요.")
+                            .font(.system(.caption, design: .rounded))
+                            .foregroundStyle(.red)
+                    }
                     Button {
                         if let url = player.audioURL {
                             analyzer.analyze(
@@ -612,24 +620,15 @@ struct ScriptView: View {
                 ZStack {
                     List {
                         ForEach(Array(analyzer.sentences.enumerated()), id: \.element.id) { index, sentence in
-                            HStack(spacing: 8) {
-                                if isEditingMode {
-                                    Image(systemName: "line.3.horizontal")
-                                        .foregroundStyle(.secondary)
-                                }
-                                sentenceRow(sentence, index: index)
-                                    .contentShape(Rectangle())
-                            }
-                            .listRowInsets(EdgeInsets())
-                            .listRowSeparator(.hidden)
-                        }
-                        .onMove { source, destination in
-                            analyzer.sentences.move(fromOffsets: source, toOffset: destination)
+                            sentenceRow(sentence, index: index)
+                                .contentShape(Rectangle())
+                                .listRowInsets(EdgeInsets())
+                                .listRowSeparator(.hidden)
                         }
                     }
                     .listStyle(.plain)
-                    .environment(\.editMode, .constant(isEditingMode ? .active : .inactive))
-                    .frame(maxHeight: 240)
+                    .environment(\.editMode, $editMode)
+                    .frame(minHeight: CGFloat(analyzer.sentences.count) * 100)
 
                     if analyzer.isAnalyzing {
                         VisualEffectBlur()
@@ -854,16 +853,6 @@ struct ScriptView: View {
             player.loopEnd = sentence.endTime
             player.startSectionRepeat(repeatCount: 9999)
         }
-        .overlay(
-            Group {
-                if isEditingMode {
-                    Image(systemName: "line.3.horizontal")
-                        .foregroundStyle(.secondary)
-                        .padding(.trailing, 8)
-                        .frame(maxWidth: .infinity, alignment: .trailing)
-                }
-            }
-        )
     }
     
     private func formatTime(_ t: Double) -> String {

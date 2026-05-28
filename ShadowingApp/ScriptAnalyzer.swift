@@ -12,10 +12,12 @@ final class ScriptAnalyzer: ObservableObject {
     @Published var editingSentenceID: UUID?
 
     private var recognitionTask: SFSpeechRecognitionTask?
+    private var recognizer: SFSpeechRecognizer?
 
     func reset() {
         recognitionTask?.cancel()
         recognitionTask = nil
+        recognizer = nil
         isAnalyzing = false
         failed = false
         isRangeEditing = false
@@ -201,7 +203,8 @@ final class ScriptAnalyzer: ObservableObject {
         recognitionTask = nil
 
         let startRecognition: () -> Void = {
-            guard let recognizer = self.makeAvailableRecognizer() else {
+            self.recognizer = self.makeAvailableRecognizer()
+            guard let recognizer = self.recognizer else {
                 self.isAnalyzing = false
                 self.failed = true
                 return
@@ -213,7 +216,6 @@ final class ScriptAnalyzer: ObservableObject {
             self.recognitionTask = recognizer.recognitionTask(with: request) { result, error in
                 Task { @MainActor in
                     if let error {
-                        print("Speech recognition error: \(error.localizedDescription)")
                         self.isAnalyzing = false
                         self.failed = true
                         self.recognitionTask = nil
@@ -262,7 +264,7 @@ final class ScriptAnalyzer: ObservableObject {
         guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US")) else {
             return nil
         }
-        return recognizer.isAvailable ? recognizer : nil
+        return recognizer
     }
 
     private func normalizeSentenceText(_ input: String) -> String {
