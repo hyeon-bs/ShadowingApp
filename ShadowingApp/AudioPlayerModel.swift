@@ -205,6 +205,12 @@ class AudioPlayerModel: NSObject, ObservableObject {
         }
     }
 
+    /// 구간 반복 해제 (전체 재생으로 복귀)
+    func stopSectionRepeat() {
+        loopSectionEnabled = false
+        currentLoopRepeat = 0
+    }
+
     func updatePlaybackRate(_ rate: Float) {
         playbackRate = rate
         player?.rate = rate

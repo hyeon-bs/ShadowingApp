@@ -222,38 +222,45 @@ struct TrackDetailView: View {
         VStack {
             if trackIndex >= 0 && trackIndex < player.playlist.count {
                 if player.duration > 0 {
-                    VStack(spacing: 20) {
-                        WaveformView(
-                            player: player,
-                            analyzer: analyzer
-                        )
-                        .frame(height: 108)
-                        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-                        
-                        if player.loopSectionEnabled && player.isWaveformLoopSelection && !analyzer.isRangeEditing {
-                            HStack {
-                                Spacer()
-                                Button("구간 취소") {
-                                    player.loopSectionEnabled = false
-                                    player.isWaveformLoopSelection = false
+                    ScrollView {
+                        VStack(spacing: 20) {
+                            WaveformView(
+                                player: player,
+                                analyzer: analyzer
+                            )
+                            .frame(height: 108)
+                            .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                            
+                            if player.loopSectionEnabled && player.isWaveformLoopSelection && !analyzer.isRangeEditing {
+                                HStack {
+                                    Spacer()
+                                    Button("구간 취소") {
+                                        player.loopSectionEnabled = false
+                                        player.isWaveformLoopSelection = false
+                                    }
+                                    .font(.system(.caption, design: .rounded))
+                                    .fontWeight(.semibold)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 7)
+                                    .background(Color.green.opacity(0.14))
+                                    .foregroundStyle(.green)
+                                    .clipShape(Capsule())
+                                    Spacer()
                                 }
-                                .font(.system(.caption, design: .rounded))
-                                .fontWeight(.semibold)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 7)
-                                .background(Color.green.opacity(0.14))
-                                .foregroundStyle(.green)
-                                .clipShape(Capsule())
-                                Spacer()
                             }
+                            
+                            PlaybackControlsView(player: player)
+                            SpeedControlView(player: player)
+                            
+                            ScriptView(player: player, analyzer: analyzer)
                         }
-                        
-                        PlaybackControlsView(player: player)
-                        SpeedControlView(player: player)
-                        
-                        ScriptView(player: player, analyzer: analyzer)
+                        .padding()
                     }
-                    .padding()
+                    .onTapGesture {
+                        if player.loopSectionEnabled {
+                            player.stopSectionRepeat()
+                        }
+                    }
                 } else {
                     VStack(spacing: 12) {
                         ProgressView()
@@ -426,14 +433,21 @@ struct PlaybackControlsView: View {
                     .clipShape(Circle())
             }
             
-            Button { player.togglePlay() } label: {
+            Button {
+                if player.loopSectionEnabled {
+                    player.stopSectionRepeat()
+                    if !player.isPlaying { player.togglePlay() }
+                } else {
+                    player.togglePlay()
+                }
+            } label: {
                 Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
                     .font(.system(size: 26))
                     .foregroundStyle(.white)
                     .frame(width: 64, height: 64)
-                    .background(Color.green)
+                    .background(player.loopSectionEnabled ? Color.green.opacity(0.55) : Color.green)
                     .clipShape(Circle())
-                    .shadow(color: .green.opacity(0.3), radius: 8, y: 4)
+                    .shadow(color: Color.green.opacity(0.3), radius: 8, y: 4)
             }
             
             Button { player.seek(to: player.currentTime + 5) } label: {
@@ -508,18 +522,16 @@ struct ScriptView: View {
     @ObservedObject var analyzer: ScriptAnalyzer
     
     @State private var isVisible = true
-    @State private var popupSentenceID: UUID? = nil
-    @State private var popupText: String = ""
-    @State private var popupStartText: String = ""
-    @State private var popupEndText: String = ""
-    @State private var showEditSheet: Bool = false
     @State private var isEditingMode: Bool = false
+    @State private var editMode: EditMode = .inactive
     
     @State private var showQuickEdit = false
     @State private var quickEditSentenceID: UUID?
     @State private var quickEditText: String = ""
+    @State private var quickEditStartTime: Double = 0
+    @State private var quickEditEndTime: Double = 0
     
-    @State private var editMode: EditMode = .inactive
+    @State private var actionSentenceID: UUID?
     
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -621,14 +633,18 @@ struct ScriptView: View {
                     List {
                         ForEach(Array(analyzer.sentences.enumerated()), id: \.element.id) { index, sentence in
                             sentenceRow(sentence, index: index)
-                                .contentShape(Rectangle())
-                                .listRowInsets(EdgeInsets())
+                                .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: isEditingMode ? 2 : 0))
                                 .listRowSeparator(.hidden)
+                                .moveDisabled(!isEditingMode)
+                        }
+                        .onMove { source, destination in
+                            analyzer.sentences.move(fromOffsets: source, toOffset: destination)
                         }
                     }
                     .listStyle(.plain)
                     .environment(\.editMode, $editMode)
-                    .frame(minHeight: CGFloat(analyzer.sentences.count) * 100)
+                    .scrollDisabled(true)
+                    .frame(height: max(CGFloat(analyzer.sentences.count) * 70, 60))
 
                     if analyzer.isAnalyzing {
                         VisualEffectBlur()
@@ -654,132 +670,63 @@ struct ScriptView: View {
         .padding(18)
         .background(Color(.secondarySystemGroupedBackground))
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .sheet(isPresented: $showEditSheet) {
+        .confirmationDialog("문장 편집", isPresented: Binding(
+            get: { actionSentenceID != nil },
+            set: { if !$0 { actionSentenceID = nil } }
+        ), titleVisibility: .hidden) {
+            Button("편집") {
+                if let id = actionSentenceID,
+                   let seg = analyzer.sentences.first(where: { $0.id == id }) {
+                    quickEditSentenceID = id
+                    quickEditText = seg.text
+                    quickEditStartTime = seg.startTime
+                    quickEditEndTime = seg.endTime
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        showQuickEdit = true
+                    }
+                }
+            }
+            Button("삭제", role: .destructive) {
+                if let id = actionSentenceID {
+                    withAnimation {
+                        analyzer.sentences.removeAll { $0.id == id }
+                    }
+                }
+            }
+            Button("취소", role: .cancel) {}
         }
         .sheet(isPresented: $showQuickEdit) {
-            NavigationStack {
-                VStack(spacing: 16) {
-                    // Mini rounded waveform with draggable range selection
-                    GeometryReader { geo in
-                        let bars = player.waveformData
-                        let count = max(1, bars.count)
-                        let width = geo.size.width
-                        let height = geo.size.height
-                        let barSpacing: CGFloat = 2
-                        let barWidth = max(1, (width - CGFloat(count - 1) * barSpacing) / CGFloat(count))
-                        
-                        // Compute current sentence range in pixels
-                        let (a, b): (Double, Double) = {
-                            if let id = quickEditSentenceID, let idx = analyzer.sentences.firstIndex(where: { $0.id == id }) {
-                                return (analyzer.sentences[idx].startTime, analyzer.sentences[idx].endTime)
-                            }
-                            return (0, 0)
-                        }()
-                        let total = max(0.0001, player.duration)
-                        let aX = CGFloat(a / total) * width
-                        let bX = CGFloat(b / total) * width
-                        let rangeMinX = min(aX, bX)
-                        let rangeMaxX = max(aX, bX)
-                        
-                        ZStack(alignment: .leading) {
-                            // Bars
-                            HStack(spacing: barSpacing) {
-                                ForEach(0..<count, id: \.self) { i in
-                                    let h = max(0.1, Double(bars[i]))
-                                    Rectangle()
-                                        .fill(Color.secondary.opacity(0.35))
-                                        .frame(width: barWidth, height: height * h)
-                                }
-                            }
-                            // Green highlighted current range
-                            Rectangle()
-                                .fill(Color.green.opacity(0.25))
-                                .frame(width: max(0, rangeMaxX - rangeMinX))
-                                .offset(x: rangeMinX)
+            if let id = quickEditSentenceID {
+                QuickEditSheet(
+                    text: $quickEditText,
+                    startTime: $quickEditStartTime,
+                    endTime: $quickEditEndTime,
+                    duration: player.duration,
+                    player: player,
+                    onSave: {
+                        if let idx = analyzer.sentences.firstIndex(where: { $0.id == id }) {
+                            analyzer.sentences[idx].text = quickEditText
+                            analyzer.sentences[idx].startTime = quickEditStartTime
+                            analyzer.sentences[idx].endTime = quickEditEndTime
                         }
-                        .contentShape(Rectangle())
-                        .gesture(
-                            DragGesture(minimumDistance: 0)
-                                .onChanged { value in
-                                    let clampedX = max(0, min(width, value.location.x))
-                                    let time = Double(clampedX / width) * total
-                                    if let id = quickEditSentenceID, let idx = analyzer.sentences.firstIndex(where: { $0.id == id }) {
-                                        // If drag just began, set start to current and end to same; otherwise extend end
-                                        if value.startLocation == value.location {
-                                            analyzer.sentences[idx].startTime = time
-                                            analyzer.sentences[idx].endTime = time
-                                        } else {
-                                            analyzer.sentences[idx].endTime = time
-                                        }
-                                    }
-                                }
-                        )
-                    }
-                    .frame(height: 100)
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
-                    )
-                    
-                    // Text editor for sentence content
-                    TextEditor(text: $quickEditText)
-                        .font(.system(size: 20, weight: .regular, design: .rounded))
-                        .padding()
-                        .background(Color(.secondarySystemBackground))
-                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                        .frame(maxHeight: 200)
-                    
-                    Spacer()
-                    
-                    Button {
-                        guard let id = quickEditSentenceID,
-                              let idx = analyzer.sentences.firstIndex(where: { $0.id == id })
-                        else { showQuickEdit = false; return }
-                        analyzer.updateSentenceText(at: idx, newText: quickEditText)
-                        // Range already updated via drag; ensure it is within duration
-                        analyzer.sentences[idx].startTime = max(0, min(player.duration, analyzer.sentences[idx].startTime))
-                        analyzer.sentences[idx].endTime = max(0, min(player.duration, analyzer.sentences[idx].endTime))
+                        player.stopSectionRepeat()
                         showQuickEdit = false
-                    } label: {
-                        Text("저장")
-                            .font(.system(.headline, design: .rounded))
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 12)
-                            .background(Color.green)
-                            .foregroundStyle(.white)
-                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    },
+                    onCancel: {
+                        player.stopSectionRepeat()
+                        showQuickEdit = false
                     }
-                    .padding(.horizontal)
-                }
-                .padding()
-                .navigationTitle("편집")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .topBarLeading) {
-                        Button(action: { showQuickEdit = false }) {
-                            Image(systemName: "checkmark")
-                                .font(.system(size: 13, weight: .bold))
-                        }
-                    }
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Button(role: .destructive) {
-                            if let id = quickEditSentenceID, let idx = analyzer.sentences.firstIndex(where: { $0.id == id }) {
-                                analyzer.sentences.remove(at: idx)
-                            }
-                            showQuickEdit = false
-                        } label: { Image(systemName: "trash") }
-                    }
-                }
+                )
+                .presentationDetents([.medium])
+                .presentationDragIndicator(.visible)
             }
         }
     }
     
-    // 개별 문장 행 뷰
+    // MARK: - 개별 문장 행 뷰
     @ViewBuilder
     private func sentenceRow(_ sentence: SentenceSegment, index: Int) -> some View {
-        let isCurrentlyPlaying = player.currentTime >= sentence.startTime &&
-        player.currentTime < sentence.endTime
+        let isCurrentlyPlaying = player.currentTime >= sentence.startTime && player.currentTime < sentence.endTime
         
         HStack(alignment: .top, spacing: 12) {
             Group {
@@ -789,14 +736,12 @@ struct ScriptView: View {
                         .foregroundColor(.green)
                         .padding(.top, 4)
                 } else {
-                    // 01, 02, 03 형태로 포맷팅된 번호
                     Text(String(format: "%02d", index + 1))
                         .font(.system(.caption, design: .monospaced))
                         .foregroundColor(Color.primary.opacity(0.3))
                 }
             }
             .frame(width: 24, alignment: .leading)
-            // Spacer().frame(width: 0)
             
             VStack(alignment: .leading, spacing: 4) {
                 Text(sentence.text)
@@ -806,11 +751,9 @@ struct ScriptView: View {
                     .multilineTextAlignment(.leading)
                     .fixedSize(horizontal: false, vertical: true)
                 
-                HStack(spacing: 8) {
-                    Text("\(formatTime(sentence.startTime)) - \(formatTime(sentence.endTime))")
-                        .font(.system(.caption2, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                }
+                Text("\(formatTime(sentence.startTime)) - \(formatTime(sentence.endTime))")
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -818,40 +761,23 @@ struct ScriptView: View {
         .padding(.horizontal, 12)
         .background(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill((player.loopSectionEnabled &&
-                       player.currentTime >= sentence.startTime &&
-                       player.currentTime < sentence.endTime)
-                      ? Color.green.opacity(0.18) : Color.clear)
+                .fill((player.loopSectionEnabled && isCurrentlyPlaying) ? Color.green.opacity(0.18) : Color.clear)
         )
         .contentShape(Rectangle())
-        .simultaneousGesture(
-            LongPressGesture(minimumDuration: 0.35)
-                .onEnded { _ in
-                    // 편집 모드일 때만 롱프레스 편집 허용
-                    if isEditingMode {
-                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                            quickEditSentenceID = sentence.id
-                            quickEditText = sentence.text
-                            showQuickEdit = true
-                        }
-                    }
-                }
-        )
-        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-            Button(role: .destructive) {
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                    if let idx = analyzer.sentences.firstIndex(where: { $0.id == sentence.id }) {
-                        analyzer.sentences.remove(at: idx)
-                    }
-                }
-            } label: {
-                Label("삭제", systemImage: "trash")
-            }
-        }
         .onTapGesture {
-            player.loopStart = sentence.startTime
-            player.loopEnd = sentence.endTime
-            player.startSectionRepeat(repeatCount: 9999)
+            if isEditingMode {
+                actionSentenceID = sentence.id
+            } else {
+                if player.loopSectionEnabled
+                    && player.loopStart == sentence.startTime
+                    && player.loopEnd == sentence.endTime {
+                    player.stopSectionRepeat()
+                } else {
+                    player.loopStart = sentence.startTime
+                    player.loopEnd = sentence.endTime
+                    player.startSectionRepeat(repeatCount: 9999)
+                }
+            }
         }
     }
     
@@ -861,7 +787,6 @@ struct ScriptView: View {
         return String(format: "%d:%02d", minutes, seconds)
     }
     
-    @State private var draggedSentenceID: UUID?
 }
 
 private struct SentenceDropDelegate: DropDelegate {
@@ -891,6 +816,244 @@ private struct SentenceDropDelegate: DropDelegate {
     }
 }
 
+
+// MARK: - Mini Waveform Editor (드래그로 구간 선택)
+struct MiniWaveformEditor: View {
+    @Binding var startTime: Double
+    @Binding var endTime: Double
+    let duration: Double
+    let waveformData: [Float]
+    var currentTime: Double = 0
+    
+    private let waveformInset: CGFloat = 12
+    private let handleWidth: CGFloat = 14
+    private let minimumSegmentDuration: Double = 0.25
+    
+    @State private var isDraggingStart = false
+    @State private var isDraggingEnd = false
+    @State private var startTimeAtDragStart: Double = 0
+    @State private var endTimeAtDragStart: Double = 0
+    
+    var body: some View {
+        GeometryReader { geo in
+            let usableWidth = max(1, geo.size.width - waveformInset * 2)
+            let totalDuration = max(0.1, duration)
+            let startPct = CGFloat(startTime / totalDuration)
+            let endPct = CGFloat(endTime / totalDuration)
+            
+            ZStack(alignment: .leading) {
+                // 1. 웨이브폼 바
+                HStack(spacing: 2) {
+                    ForEach(0..<60, id: \.self) { i in
+                        let h = i < waveformData.count ? CGFloat(waveformData[i]) : 0.2
+                        let barPct = CGFloat(i) / 60.0
+                        let inRange = barPct >= startPct && barPct < endPct
+                        
+                        Capsule()
+                            .fill(inRange ? Color.green : Color.secondary.opacity(0.2))
+                            .frame(height: geo.size.height * 0.7 * max(0.1, h))
+                    }
+                }
+                .padding(.horizontal, waveformInset)
+                .frame(maxHeight: .infinity, alignment: .center)
+                
+                // 2. 선택 영역 배경
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(Color.green.opacity(0.08))
+                    .frame(width: max(0, usableWidth * (endPct - startPct)))
+                    .offset(x: waveformInset + usableWidth * startPct)
+                    .frame(maxHeight: .infinity)
+                    .allowsHitTesting(false)
+                
+                // 3. 플레이헤드
+                if currentTime >= startTime && currentTime <= endTime {
+                    let playPct = CGFloat(currentTime / totalDuration)
+                    Rectangle()
+                        .fill(Color.white)
+                        .frame(width: 2)
+                        .offset(x: waveformInset + usableWidth * playPct - 1)
+                        .frame(maxHeight: .infinity)
+                        .allowsHitTesting(false)
+                }
+                
+                // 4. 왼쪽 핸들 (시작)
+                handleView()
+                    .offset(x: waveformInset + usableWidth * startPct - handleWidth)
+                    .gesture(
+                        DragGesture()
+                            .onChanged { value in
+                                if !isDraggingStart {
+                                    isDraggingStart = true
+                                    startTimeAtDragStart = startTime
+                                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                }
+                                let timeDelta = Double(value.translation.width / usableWidth) * totalDuration
+                                let newTime = startTimeAtDragStart + timeDelta
+                                startTime = max(0, min(newTime, endTime - minimumSegmentDuration))
+                            }
+                            .onEnded { _ in isDraggingStart = false }
+                    )
+                
+                // 5. 오른쪽 핸들 (끝)
+                handleView()
+                    .offset(x: waveformInset + usableWidth * endPct)
+                    .gesture(
+                        DragGesture()
+                            .onChanged { value in
+                                if !isDraggingEnd {
+                                    isDraggingEnd = true
+                                    endTimeAtDragStart = endTime
+                                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                }
+                                let timeDelta = Double(value.translation.width / usableWidth) * totalDuration
+                                let newTime = endTimeAtDragStart + timeDelta
+                                endTime = min(totalDuration, max(newTime, startTime + minimumSegmentDuration))
+                            }
+                            .onEnded { _ in isDraggingEnd = false }
+                    )
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private func handleView() -> some View {
+        RoundedRectangle(cornerRadius: 3, style: .continuous)
+            .fill(Color.green)
+            .frame(width: handleWidth)
+            .frame(maxHeight: .infinity)
+            .overlay(
+                VStack(spacing: 2) {
+                    ForEach(0..<3, id: \.self) { _ in
+                        RoundedRectangle(cornerRadius: 0.5)
+                            .fill(Color.white.opacity(0.8))
+                            .frame(width: 6, height: 1.5)
+                    }
+                }
+            )
+            .contentShape(Rectangle().inset(by: -10))
+    }
+}
+
+// MARK: - Quick Edit Sheet
+struct QuickEditSheet: View {
+    @Binding var text: String
+    @Binding var startTime: Double
+    @Binding var endTime: Double
+    var duration: Double
+    @ObservedObject var player: AudioPlayerModel
+    var onSave: () -> Void
+    var onCancel: () -> Void
+    
+    @FocusState private var isFocused: Bool
+    
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 16) {
+                // 1. 문장 텍스트 편집
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("문장")
+                        .font(.system(.caption, design: .rounded))
+                        .foregroundStyle(.secondary)
+                    TextEditor(text: $text)
+                        .focused($isFocused)
+                        .font(.system(.body, design: .rounded))
+                        .padding(10)
+                        .frame(minHeight: 60)
+                        .background(Color(.tertiarySystemGroupedBackground))
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+                
+                // 2. 웨이브폼 구간 선택
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("구간")
+                        .font(.system(.caption, design: .rounded))
+                        .foregroundStyle(.secondary)
+                    
+                    MiniWaveformEditor(
+                        startTime: $startTime,
+                        endTime: $endTime,
+                        duration: duration,
+                        waveformData: player.waveformData,
+                        currentTime: player.currentTime
+                    )
+                    .frame(height: 64)
+                    .background(Color(.tertiarySystemGroupedBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+                
+                // 3. 시간 표시 + 재생 버튼
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("시작")
+                            .font(.system(.caption2, design: .rounded))
+                            .foregroundStyle(.tertiary)
+                        Text(formatTimeDetailed(startTime))
+                            .font(.system(.callout, design: .monospaced))
+                            .fontWeight(.medium)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(10)
+                    .background(Color(.tertiarySystemGroupedBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    
+                    Image(systemName: "arrow.right")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                    
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("끝")
+                            .font(.system(.caption2, design: .rounded))
+                            .foregroundStyle(.tertiary)
+                        Text(formatTimeDetailed(endTime))
+                            .font(.system(.callout, design: .monospaced))
+                            .fontWeight(.medium)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(10)
+                    .background(Color(.tertiarySystemGroupedBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    
+                    // 미리듣기 버튼
+                    Button {
+                        if player.isPlaying {
+                            player.togglePlay()
+                        } else {
+                            player.loopStart = startTime
+                            player.loopEnd = endTime
+                            player.startSectionRepeat(repeatCount: 1)
+                        }
+                    } label: {
+                        Image(systemName: player.isPlaying ? "pause.circle.fill" : "play.circle.fill")
+                            .font(.system(size: 36))
+                            .foregroundStyle(.green)
+                    }
+                }
+                
+                Spacer()
+            }
+            .padding()
+            .navigationTitle("문장 편집")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("취소") { onCancel() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("저장") { onSave() }
+                        .fontWeight(.semibold)
+                }
+            }
+        }
+        .onAppear { isFocused = true }
+    }
+    
+    private func formatTimeDetailed(_ t: Double) -> String {
+        let minutes = Int(t) / 60
+        let seconds = Int(t) % 60
+        let fraction = Int((t - Double(Int(t))) * 10)
+        return String(format: "%d:%02d.%d", minutes, seconds, fraction)
+    }
+}
 
 struct VisualEffectBlur: UIViewRepresentable {
     var style: UIBlurEffect.Style = .systemMaterial
