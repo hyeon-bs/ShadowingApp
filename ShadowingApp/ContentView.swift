@@ -565,6 +565,11 @@ struct ScriptView: View {
                     withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                         isEditingMode.toggle()
                         editMode = isEditingMode ? .active : .inactive
+                        if isEditingMode {
+                            // 편집 모드 진입 시 재생 정지
+                            if player.isPlaying { player.togglePlay() }
+                            player.stopSectionRepeat()
+                        }
                     }
                 } label: {
                     Text(isEditingMode ? "완료" : "편집")
@@ -670,31 +675,6 @@ struct ScriptView: View {
         .padding(18)
         .background(Color(.secondarySystemGroupedBackground))
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .confirmationDialog("문장 편집", isPresented: Binding(
-            get: { actionSentenceID != nil },
-            set: { if !$0 { actionSentenceID = nil } }
-        ), titleVisibility: .hidden) {
-            Button("편집") {
-                if let id = actionSentenceID,
-                   let seg = analyzer.sentences.first(where: { $0.id == id }) {
-                    quickEditSentenceID = id
-                    quickEditText = seg.text
-                    quickEditStartTime = seg.startTime
-                    quickEditEndTime = seg.endTime
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                        showQuickEdit = true
-                    }
-                }
-            }
-            Button("삭제", role: .destructive) {
-                if let id = actionSentenceID {
-                    withAnimation {
-                        analyzer.sentences.removeAll { $0.id == id }
-                    }
-                }
-            }
-            Button("취소", role: .cancel) {}
-        }
         .sheet(isPresented: $showQuickEdit) {
             if let id = quickEditSentenceID {
                 QuickEditSheet(
@@ -766,7 +746,11 @@ struct ScriptView: View {
         .contentShape(Rectangle())
         .onTapGesture {
             if isEditingMode {
-                actionSentenceID = sentence.id
+                if actionSentenceID == sentence.id {
+                    actionSentenceID = nil
+                } else {
+                    actionSentenceID = sentence.id
+                }
             } else {
                 if player.loopSectionEnabled
                     && player.loopStart == sentence.startTime
@@ -778,6 +762,55 @@ struct ScriptView: View {
                     player.startSectionRepeat(repeatCount: 9999)
                 }
             }
+        }
+        .popover(
+            isPresented: Binding(
+                get: { actionSentenceID == sentence.id },
+                set: { if !$0 { actionSentenceID = nil } }
+            ),
+            arrowEdge: .top
+        ) {
+            VStack(spacing: 0) {
+                Button {
+                    let id = sentence.id
+                    actionSentenceID = nil
+                    quickEditSentenceID = id
+                    quickEditText = sentence.text
+                    quickEditStartTime = sentence.startTime
+                    quickEditEndTime = sentence.endTime
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                        showQuickEdit = true
+                    }
+                } label: {
+                    Label("편집", systemImage: "pencil")
+                        .font(.system(.body, design: .rounded))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 14)
+                }
+                .buttonStyle(.plain)
+                
+                Divider()
+                
+                Button(role: .destructive) {
+                    actionSentenceID = nil
+                    withAnimation {
+                        if let idx = analyzer.sentences.firstIndex(where: { $0.id == sentence.id }) {
+                            analyzer.sentences.remove(at: idx)
+                        }
+                    }
+                } label: {
+                    Label("삭제", systemImage: "trash")
+                        .font(.system(.body, design: .rounded))
+                        .foregroundStyle(.red)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 14)
+                }
+                .buttonStyle(.plain)
+            }
+            .frame(width: 160)
+            .presentationCompactAdaptation(.popover)
         }
     }
     

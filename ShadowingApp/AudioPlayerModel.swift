@@ -119,6 +119,9 @@ class AudioPlayerModel: NSObject, ObservableObject {
     /// 트랙 선택 + 바로 재생 — 꾹 누르기 시 사용
     func playTrack(at index: Int) {
         guard index < playlist.count else { return }
+        
+        // 트랙 재생 시 구간 반복 해제 (전체 재생)
+        stopSectionRepeat()
 
         if currentTrackIndex == index {
             // 이미 선택된 트랙이면 처음부터 재생
