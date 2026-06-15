@@ -11,6 +11,9 @@ final class ScriptAnalyzer: ObservableObject {
     @Published var isRangeEditing = false
     @Published var editingSentenceID: UUID?
 
+    /// 현재 작업 중인 트랙 ID (저장 시 사용)
+    var currentTrackID: UUID?
+
     private var recognitionTask: SFSpeechRecognitionTask?
     private var recognizer: SFSpeechRecognizer?
 
@@ -22,7 +25,25 @@ final class ScriptAnalyzer: ObservableObject {
         failed = false
         isRangeEditing = false
         editingSentenceID = nil
+        currentTrackID = nil
         sentences.removeAll()
+    }
+
+    /// 디스크에서 저장된 문장 로드. 성공하면 true 반환.
+    func loadSentences(forTrackID trackID: UUID) -> Bool {
+        currentTrackID = trackID
+        if let saved = PersistenceManager.loadSentences(forTrackID: trackID) {
+            sentences = saved
+            failed = false
+            return true
+        }
+        return false
+    }
+
+    /// 현재 문장을 디스크에 저장
+    func saveSentencesIfNeeded() {
+        guard let trackID = currentTrackID, !sentences.isEmpty else { return }
+        PersistenceManager.saveSentences(sentences, forTrackID: trackID)
     }
 
     func splitSentence(at index: Int, splitTime: Double) {
@@ -51,6 +72,7 @@ final class ScriptAnalyzer: ObservableObject {
 
         sentences[index] = left
         sentences.insert(right, at: index + 1)
+        saveSentencesIfNeeded()
     }
 
     func mergeWithNext(at index: Int) {
@@ -72,6 +94,7 @@ final class ScriptAnalyzer: ObservableObject {
 
         sentences[index] = merged
         sentences.remove(at: index + 1)
+        saveSentencesIfNeeded()
     }
 
     func updateSentenceText(at index: Int, newText: String) {
@@ -84,6 +107,7 @@ final class ScriptAnalyzer: ObservableObject {
             startTime: current.startTime,
             endTime: current.endTime
         )
+        saveSentencesIfNeeded()
     }
 
     func addSentence(at time: Double, defaultDuration: Double = 1.5) {
@@ -98,6 +122,7 @@ final class ScriptAnalyzer: ObservableObject {
         } else {
             sentences.append(newSegment)
         }
+        saveSentencesIfNeeded()
     }
 
     func insertSentence(before index: Int, defaultDuration: Double = 1.0) {
@@ -107,6 +132,7 @@ final class ScriptAnalyzer: ObservableObject {
         let start = max(0, end - defaultDuration)
         let segment = SentenceSegment(text: "New sentence.", startTime: start, endTime: end)
         sentences.insert(segment, at: index)
+        saveSentencesIfNeeded()
     }
 
     func insertSentence(after index: Int, defaultDuration: Double = 1.0) {
@@ -116,6 +142,7 @@ final class ScriptAnalyzer: ObservableObject {
         let end = start + defaultDuration
         let segment = SentenceSegment(text: "New sentence.", startTime: start, endTime: end)
         sentences.insert(segment, at: index + 1)
+        saveSentencesIfNeeded()
     }
 
     func updateSentenceStart(at index: Int, newStart: Double) {
@@ -138,6 +165,7 @@ final class ScriptAnalyzer: ObservableObject {
             startTime: adjusted,
             endTime: current.endTime
         )
+        saveSentencesIfNeeded()
     }
 
     func updateSentenceEnd(at index: Int, newEnd: Double) {
@@ -158,6 +186,7 @@ final class ScriptAnalyzer: ObservableObject {
             startTime: current.startTime,
             endTime: adjusted
         )
+        saveSentencesIfNeeded()
     }
 
     func sentenceIndex(containing time: Double) -> Int? {
@@ -186,6 +215,7 @@ final class ScriptAnalyzer: ObservableObject {
 
         let current = sentences[index]
         sentences[index] = SentenceSegment(text: current.text, startTime: newStart, endTime: newEnd)
+        saveSentencesIfNeeded()
     }
 
     func analyze(url: URL, duration: Double) {
@@ -212,6 +242,7 @@ final class ScriptAnalyzer: ObservableObject {
 
             let request = SFSpeechURLRecognitionRequest(url: url)
             request.shouldReportPartialResults = false
+            request.addsPunctuation = true
 
             self.recognitionTask = recognizer.recognitionTask(with: request) { result, error in
                 Task { @MainActor in
@@ -234,6 +265,7 @@ final class ScriptAnalyzer: ObservableObject {
                         self.isAnalyzing = false
                         self.failed = built.isEmpty
                         self.recognitionTask = nil
+                        self.saveSentencesIfNeeded()
                     }
                 }
             }
@@ -340,7 +372,7 @@ final class ScriptAnalyzer: ObservableObject {
             let gap = seg.timestamp - lastEnd
             let isLast = index == segments.count - 1
 
-            if gap > 0.7 && !words.isEmpty {
+            if gap > 0.4 && !words.isEmpty {
                 output.append(
                     SentenceSegment(
                         text: words.joined(separator: " "),
@@ -359,7 +391,7 @@ final class ScriptAnalyzer: ObservableObject {
             if token.hasSuffix(".")
                 || token.hasSuffix("?")
                 || token.hasSuffix("!")
-                || words.count >= 12
+                || words.count >= 8
                 || isLast {
 
                 output.append(

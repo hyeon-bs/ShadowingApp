@@ -49,6 +49,9 @@ struct ContentView: View {
                 )
             }
         }
+        .task {
+            player.loadPersistedPlaylist()
+        }
     }
 }
 
@@ -164,9 +167,13 @@ struct PlaylistView: View {
                             let indices = player.selectedTrackIndices.sorted(by: >)
                             for i in indices {
                                 if i >= 0 && i < player.playlist.count {
+                                    let track = player.playlist[i]
+                                    PersistenceManager.deleteAudio(trackID: track.id, fileName: track.name)
+                                    PersistenceManager.deleteSentences(forTrackID: track.id)
                                     player.playlist.remove(at: i)
                                 }
                             }
+                            PersistenceManager.savePlaylist(player.playlist)
                             player.selectedTrackIndices.removeAll()
                             withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
                                 isSelectionMode = false
@@ -275,8 +282,11 @@ struct TrackDetailView: View {
         .navigationTitle(trackIndex < player.playlist.count ? player.playlist[trackIndex].name : "")
         .navigationBarTitleDisplayMode(.inline)
         .task {
-            if analyzer.sentences.isEmpty {
-                    analyzer.reset()
+            guard trackIndex < player.playlist.count else { return }
+            let track = player.playlist[trackIndex]
+            if !analyzer.loadSentences(forTrackID: track.id) {
+                analyzer.reset()
+                analyzer.currentTrackID = track.id
             }
             try? await Task.sleep(nanoseconds: 200_000_000)
             player.selectTrack(at: trackIndex)
@@ -588,6 +598,7 @@ struct ScriptView: View {
                         let end = min(player.duration, start + 2.0)
                         let new = SentenceSegment(text: "새 문장", startTime: start, endTime: end)
                         withAnimation { analyzer.sentences.append(new) }
+                        analyzer.saveSentencesIfNeeded()
                     } label: {
                         Image(systemName: "plus.circle.fill")
                             .font(.system(size: 16, weight: .semibold))
@@ -644,6 +655,7 @@ struct ScriptView: View {
                         }
                         .onMove { source, destination in
                             analyzer.sentences.move(fromOffsets: source, toOffset: destination)
+                            analyzer.saveSentencesIfNeeded()
                         }
                     }
                     .listStyle(.plain)
@@ -689,6 +701,7 @@ struct ScriptView: View {
                             analyzer.sentences[idx].startTime = quickEditStartTime
                             analyzer.sentences[idx].endTime = quickEditEndTime
                         }
+                        analyzer.saveSentencesIfNeeded()
                         player.stopSectionRepeat()
                         showQuickEdit = false
                     },
@@ -799,6 +812,7 @@ struct ScriptView: View {
                             analyzer.sentences.remove(at: idx)
                         }
                     }
+                    analyzer.saveSentencesIfNeeded()
                 } label: {
                     Label("삭제", systemImage: "trash")
                         .font(.system(.body, design: .rounded))
@@ -827,6 +841,7 @@ private struct SentenceDropDelegate: DropDelegate {
     @Binding var sentences: [SentenceSegment]
     @Binding var draggedID: UUID?
     let isEnabled: Bool
+    var onReorder: (() -> Void)?
     
     func dropEntered(info: DropInfo) {
         guard isEnabled else { return }
@@ -845,6 +860,7 @@ private struct SentenceDropDelegate: DropDelegate {
     func performDrop(info: DropInfo) -> Bool {
         guard isEnabled else { return false }
         draggedID = nil
+        onReorder?()
         return true
     }
 }

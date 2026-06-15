@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find /Users/baeksohyeon/Documents/ShadowingApp -type f -not -path */.*)"
+    ]
+  }
+}

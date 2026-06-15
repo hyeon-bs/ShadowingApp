@@ -3,11 +3,21 @@ import AVFoundation
 import Combine
 
 // MARK: - Track Item
-struct TrackItem: Identifiable, Hashable {
-    let id = UUID()
-    let url: URL
+struct TrackItem: Identifiable, Hashable, Codable {
+    let id: UUID
     let name: String
     var duration: Double
+
+    /// 오디오 파일 URL (Application Support/audio/ 디렉토리 기준으로 재구성)
+    var url: URL {
+        PersistenceManager.audioURL(trackID: id, fileName: name)
+    }
+
+    init(id: UUID = UUID(), name: String, duration: Double) {
+        self.id = id
+        self.name = name
+        self.duration = duration
+    }
 
     func hash(into hasher: inout Hasher) {
         hasher.combine(id)
@@ -19,7 +29,7 @@ struct TrackItem: Identifiable, Hashable {
 }
 
 // MARK: - Sentence Segment
-struct SentenceSegment: Identifiable {
+struct SentenceSegment: Identifiable, Codable {
     let id: UUID
     var startTime: Double // 이미 var일 확률이 높지만 확인해 보세요.
     var endTime: Double
@@ -73,8 +83,12 @@ class AudioPlayerModel: NSObject, ObservableObject {
         let accessing = url.startAccessingSecurityScopedResource()
         defer { if accessing { url.stopAccessingSecurityScopedResource() } }
 
+        let trackID = UUID()
+        let fileName = url.lastPathComponent
+
+        // 임시 디렉토리에 먼저 복사 후 duration 추출, 그 다음 영구 저장소로 이동
         let tempURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString + "_" + url.lastPathComponent)
+            .appendingPathComponent(UUID().uuidString + "_" + fileName)
         try? FileManager.default.copyItem(at: url, to: tempURL)
 
         var dur = 0.0
@@ -82,13 +96,29 @@ class AudioPlayerModel: NSObject, ObservableObject {
             dur = p.duration
         }
 
-        let track = TrackItem(url: tempURL, name: url.lastPathComponent, duration: dur)
+        // 영구 저장소로 복사
+        guard let _ = PersistenceManager.copyAudioToPermanentStorage(
+            from: tempURL, trackID: trackID, fileName: fileName
+        ) else {
+            try? FileManager.default.removeItem(at: tempURL)
+            return
+        }
+        try? FileManager.default.removeItem(at: tempURL)
+
+        let track = TrackItem(id: trackID, name: fileName, duration: dur)
         playlist.append(track)
+        PersistenceManager.savePlaylist(playlist)
     }
     
     func removeTrack(at index: Int) {
         guard index < playlist.count else { return }
+        let track = playlist[index]
         playlist.remove(at: index)
+
+        // 관련 파일 정리
+        PersistenceManager.deleteAudio(trackID: track.id, fileName: track.name)
+        PersistenceManager.deleteSentences(forTrackID: track.id)
+        PersistenceManager.savePlaylist(playlist)
 
         if currentTrackIndex == index {
             stopPlayback()
@@ -102,6 +132,12 @@ class AudioPlayerModel: NSObject, ObservableObject {
         } else if currentTrackIndex > index {
             currentTrackIndex -= 1
         }
+    }
+
+    /// 앱 시작 시 저장된 재생목록 로드
+    func loadPersistedPlaylist() {
+        guard playlist.isEmpty else { return }
+        playlist = PersistenceManager.loadPlaylist()
     }
 
     /// 트랙 선택만 (재생 안 함) — 탭 시 사용
