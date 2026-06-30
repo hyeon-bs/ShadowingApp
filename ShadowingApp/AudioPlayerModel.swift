@@ -377,6 +377,12 @@ class AudioPlayerModel: NSObject, ObservableObject {
         }
     }
 
+    /// 반복 재생 중지
+    func stopLoopAll() {
+        loopAllEnabled = false
+        stopPlayback()
+    }
+
     // MARK: - 다음 트랙으로
     func playNextTrack() {
         guard !playlist.isEmpty else { return }
@@ -399,6 +405,30 @@ class AudioPlayerModel: NSObject, ObservableObject {
                 playTrack(at: currentTrackIndex)
             } else {
                 stopPlayback()
+            }
+        }
+    }
+
+    /// 이전 트랙으로
+    func playPreviousTrack() {
+        guard !playlist.isEmpty else { return }
+
+        if loopAllEnabled && !selectedTrackIndices.isEmpty {
+            let sorted = selectedTrackIndices.sorted()
+            if let prevIdx = sorted.last(where: { $0 < currentTrackIndex }) {
+                playTrack(at: prevIdx)
+            } else {
+                // 처음이면 마지막 선택 트랙으로
+                playTrack(at: sorted.last ?? currentTrackIndex)
+            }
+        } else {
+            let prevIndex = currentTrackIndex - 1
+            if prevIndex >= 0 {
+                playTrack(at: prevIndex)
+            } else {
+                // 처음이면 현재 트랙을 다시 시작
+                seek(to: 0)
+                if !isPlaying { togglePlay() }
             }
         }
     }

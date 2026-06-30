@@ -12,18 +12,169 @@ struct ContentView: View {
     @StateObject var analyzer = ScriptAnalyzer()
     @State private var showFilePicker = false
     @State private var navigationPath = NavigationPath()
+    @State private var isSelectionMode = false
     
     var body: some View {
         NavigationStack(path: $navigationPath) {
-            ZStack {
+            ZStack(alignment: .bottom) {
                 Color(.systemGroupedBackground).ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
+                            if player.loopAllEnabled {
+                                player.loopAllEnabled = false
+                                player.stop()
+                            }
+                            if isSelectionMode {
+                                isSelectionMode = false
+                                player.selectedTrackIndices.removeAll()
+                            }
+                        }
+                    }
                 ScrollView {
                     VStack(spacing: 16) {
-                        PlaylistView(player: player) { index in
+                        PlaylistView(player: player, isSelectionMode: $isSelectionMode) { index in
                             navigationPath.append(index)
                         }
                     }
                     .padding()
+                    .padding(.bottom, (isSelectionMode || player.loopAllEnabled) ? 70 : 0)
+                }
+                
+                // 선택 모드 하단 고정 바
+                // 반복 재생 중 하단 컨트롤 (일반 모드)
+                if !isSelectionMode && player.loopAllEnabled {
+                    HStack(spacing: 16) {
+                        Spacer()
+                        Button {
+                            player.playPreviousTrack()
+                        } label: {
+                            Image(systemName: "backward.fill")
+                                .font(.system(size: 18))
+                                .foregroundStyle(.green)
+                                .frame(width: 44, height: 44)
+                        }
+                        
+                        Button {
+                            player.loopAllEnabled = false
+                            player.stop()
+                            player.selectedTrackIndices.removeAll()
+                            player.currentTrackIndex = -1
+                        } label: {
+                            Image(systemName: "stop.fill")
+                                .font(.system(size: 18))
+                                .foregroundStyle(.green)
+                                .frame(width: 44, height: 44)
+                        }
+                        
+                        Button {
+                            player.playNextTrack()
+                        } label: {
+                            Image(systemName: "forward.fill")
+                                .font(.system(size: 18))
+                                .foregroundStyle(.green)
+                                .frame(width: 44, height: 44)
+                        }
+                        Spacer()
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.top, 16)
+                    .padding(.bottom, 12)
+                    .frame(maxWidth: .infinity)
+                    .background(
+                        Rectangle()
+                            .fill(.ultraThinMaterial)
+                            .mask(
+                                VStack(spacing: 0) {
+                                    LinearGradient(
+                                        colors: [.clear, .black],
+                                        startPoint: .top,
+                                        endPoint: .bottom
+                                    )
+                                    .frame(height: 20)
+                                    Color.black
+                                }
+                            )
+                            .ignoresSafeArea()
+                    )
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+                
+                // 선택 모드 하단 고정 바
+                if isSelectionMode {
+                    HStack(spacing: 12) {
+                        Button(role: .destructive) {
+                                let indices = player.selectedTrackIndices.sorted(by: >)
+                                for i in indices {
+                                    if i >= 0 && i < player.playlist.count {
+                                        let track = player.playlist[i]
+                                        PersistenceManager.deleteAudio(trackID: track.id, fileName: track.name)
+                                        PersistenceManager.deleteSentences(forTrackID: track.id)
+                                        player.playlist.remove(at: i)
+                                    }
+                                }
+                                PersistenceManager.savePlaylist(player.playlist)
+                                player.selectedTrackIndices.removeAll()
+                                withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
+                                    isSelectionMode = false
+                                }
+                            } label: {
+                                Text("삭제")
+                                    .font(.system(.subheadline, design: .rounded))
+                                    .fontWeight(.semibold)
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 8)
+                                    .background(Color.red.opacity(0.12))
+                                    .foregroundStyle(.red)
+                                    .clipShape(Capsule())
+                            }
+                            
+                            Spacer()
+                            
+                            Button {
+                                player.playSelectedTracks()
+                                withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
+                                    isSelectionMode = false
+                                }
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "repeat")
+                                        .font(.caption)
+                                    Text("반복재생")
+                                        .font(.system(.subheadline, design: .rounded))
+                                        .fontWeight(.semibold)
+                                }
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 8)
+                                .background(player.selectedTrackIndices.isEmpty ? Color.gray.opacity(0.12) : Color.green)
+                                .foregroundColor(
+                                    player.selectedTrackIndices.isEmpty ? .secondary : .white
+                                )
+                                .clipShape(Capsule())
+                            }
+                            .disabled(player.selectedTrackIndices.isEmpty)
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.top, 16)
+                    .padding(.bottom, 12)
+                    .frame(maxWidth: .infinity)
+                    .background(
+                        Rectangle()
+                            .fill(.ultraThinMaterial)
+                            .mask(
+                                VStack(spacing: 0) {
+                                    LinearGradient(
+                                        colors: [.clear, .black],
+                                        startPoint: .top,
+                                        endPoint: .bottom
+                                    )
+                                    .frame(height: 20)
+                                    Color.black
+                                }
+                            )
+                            .ignoresSafeArea()
+                    )
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
             .navigationTitle("쉐도잉")
@@ -58,7 +209,11 @@ struct ContentView: View {
 // MARK: - Playlist View (목록)
 struct PlaylistView: View {
     @ObservedObject var player: AudioPlayerModel
-    @State private var isSelectionMode = false
+    @Binding var isSelectionMode: Bool
+    @State private var isDragSelecting = false
+    @State private var dragSelectingMode: Bool = true  // true=select, false=deselect
+    @State private var dragToggledIndices: Set<Int> = []
+    @State private var rowFrames: [Int: CGRect] = [:]
     var onTapTrack: (Int) -> Void
     
     var body: some View {
@@ -70,12 +225,28 @@ struct PlaylistView: View {
                 Spacer()
                 if isSelectionMode {
                     Button {
-                        player.selectedTrackIndices.removeAll()
                         withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
                             isSelectionMode = false
+                            player.selectedTrackIndices.removeAll()
                         }
                     } label: {
                         Text("취소")
+                            .font(.system(.caption, design: .rounded))
+                            .fontWeight(.semibold)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 5)
+                            .background(Color.primary.opacity(0.06))
+                            .clipShape(Capsule())
+                    }
+                    
+                    Button {
+                        if player.selectedTrackIndices.count == player.playlist.count {
+                            player.selectedTrackIndices.removeAll()
+                        } else {
+                            player.selectedTrackIndices = Set(0..<player.playlist.count)
+                        }
+                    } label: {
+                        Text(player.selectedTrackIndices.count == player.playlist.count ? "전체해제" : "전체선택")
                             .font(.system(.caption, design: .rounded))
                             .fontWeight(.semibold)
                             .padding(.horizontal, 12)
@@ -103,35 +274,81 @@ struct PlaylistView: View {
             } else {
                 VStack(spacing: 0) {
                     ForEach(Array(player.playlist.enumerated()), id: \.element.id) { index, track in
-                        Button {
-                            if isSelectionMode {
-                                player.toggleTrackSelection(at: index)
-                                if player.selectedTrackIndices.isEmpty {
-                                    isSelectionMode = false
+                        HStack(spacing: 0) {
+                            Button {
+                                if !isSelectionMode {
+                                    onTapTrack(index)
                                 }
-                            } else {
-                                onTapTrack(index)
+                            } label: {
+                                PlaylistRowView(
+                                    track: track,
+                                    index: index,
+                                    isPlaying: player.currentTrackIndex == index && player.isPlaying,
+                                    isCurrent: player.currentTrackIndex == index,
+                                    isSelected: player.selectedTrackIndices.contains(index),
+                                    isSelectionMode: isSelectionMode,
+                                    onSelectToggle: {
+                                        withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
+                                            player.toggleTrackSelection(at: index)
+                                        }
+                                    }
+                                )
                             }
-                        } label: {
-                            PlaylistRowView(
-                                track: track,
-                                index: index,
-                                isPlaying: player.currentTrackIndex == index && player.isPlaying,
-                                isCurrent: player.currentTrackIndex == index,
-                                isSelected: player.selectedTrackIndices.contains(index)
-                            )
+                            .buttonStyle(.plain)
+                            
+                            // 선택 모드: x 삭제 버튼
+                            if isSelectionMode {
+                                Button {
+                                    let trackToDelete = player.playlist[index]
+                                    PersistenceManager.deleteAudio(trackID: trackToDelete.id, fileName: trackToDelete.name)
+                                    PersistenceManager.deleteSentences(forTrackID: trackToDelete.id)
+                                    player.selectedTrackIndices.remove(index)
+                                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                        player.playlist.remove(at: index)
+                                    }
+                                    let adjusted = player.selectedTrackIndices.compactMap { $0 > index ? $0 - 1 : ($0 < index ? $0 : nil) }
+                                    player.selectedTrackIndices = Set(adjusted)
+                                    PersistenceManager.savePlaylist(player.playlist)
+                                    if player.playlist.isEmpty {
+                                        isSelectionMode = false
+                                    }
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .font(.system(size: 18))
+                                        .foregroundStyle(.secondary)
+                                }
+                                .padding(.trailing, 14)
+                                .transition(.opacity)
+                            }
                         }
-                        .buttonStyle(.plain)
                         .simultaneousGesture(
-                            LongPressGesture(minimumDuration: 0.5)
+                            LongPressGesture(minimumDuration: 0.3)
                                 .onEnded { _ in
-                                    if !isSelectionMode {
+                                    if player.loopAllEnabled {
+                                        // 반복재생 중 꾹 누르면 재생 중지 → 선택 모드 진입
+                                        player.loopAllEnabled = false
+                                        player.stop()
+                                        withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
+                                            isSelectionMode = true
+                                        }
+                                    } else if !isSelectionMode {
                                         withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
                                             isSelectionMode = true
                                             player.toggleTrackSelection(at: index)
                                         }
                                     }
                                 }
+                        )
+                        .background(
+                            GeometryReader { rowGeo in
+                                Color.clear
+                                    .onAppear {
+                                        rowFrames[index] = rowGeo.frame(in: .named("playlistArea"))
+                                    }
+                                    .onChange(of: rowGeo.frame(in: .named("playlistArea"))) { _, newFrame in
+                                        rowFrames[index] = newFrame
+                                    }
+                            }
                         )
                         
                         if index < player.playlist.count - 1 {
@@ -141,80 +358,66 @@ struct PlaylistView: View {
                 }
                 .background(Color(.secondarySystemGroupedBackground))
                 .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-                
-                // 선택 모드 하단 바
-                if isSelectionMode {
-                    HStack(spacing: 12) {
-                        Button {
-                            if player.selectedTrackIndices.count == player.playlist.count {
-                                player.selectedTrackIndices.removeAll()
-                            } else {
-                                player.selectedTrackIndices = Set(0..<player.playlist.count)
-                            }
-                        } label: {
-                            Text(player.selectedTrackIndices.count == player.playlist.count ? "전체해제" : "전체선택")
-                                .font(.system(.subheadline, design: .rounded))
-                                .fontWeight(.semibold)
-                                .padding(.horizontal, 14)
-                                .padding(.vertical, 8)
-                                .background(Color.green.opacity(0.12))
-                                .foregroundStyle(.green)
-                                .clipShape(Capsule())
-                        }
-                        
-                        Button(role: .destructive) {
-                            // Delete selected tracks from playlist
-                            let indices = player.selectedTrackIndices.sorted(by: >)
-                            for i in indices {
-                                if i >= 0 && i < player.playlist.count {
-                                    let track = player.playlist[i]
-                                    PersistenceManager.deleteAudio(trackID: track.id, fileName: track.name)
-                                    PersistenceManager.deleteSentences(forTrackID: track.id)
-                                    player.playlist.remove(at: i)
-                                }
-                            }
-                            PersistenceManager.savePlaylist(player.playlist)
-                            player.selectedTrackIndices.removeAll()
-                            withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
-                                isSelectionMode = false
-                            }
-                        } label: {
-                            Text("삭제")
-                                .font(.system(.subheadline, design: .rounded))
-                                .fontWeight(.semibold)
-                                .padding(.horizontal, 14)
-                                .padding(.vertical, 8)
-                                .background(Color.red.opacity(0.12))
-                                .foregroundStyle(.red)
-                                .clipShape(Capsule())
-                        }
-                        
-                        Spacer()
-                        Button {
-                            player.playSelectedTracks()
-                        } label: {
-                            HStack(spacing: 4) {
-                                Image(systemName: "repeat")
-                                    .font(.caption)
-                                Text("반복재생")
-                                    .font(.system(.subheadline, design: .rounded))
-                                    .fontWeight(.semibold)
-                            }
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 8)
-                            .background(player.selectedTrackIndices.isEmpty ? Color.gray.opacity(0.12) : Color.green)
-                            .foregroundColor(
-                                player.selectedTrackIndices.isEmpty ? .secondary : .white
+                .coordinateSpace(name: "playlistArea")
+                .overlay(alignment: .leading) {
+                    if isSelectionMode {
+                        Color.clear
+                            .frame(width: 50)
+                            .contentShape(Rectangle())
+                            .simultaneousGesture(
+                                DragGesture(minimumDistance: 0, coordinateSpace: .named("playlistArea"))
+                                    .onChanged { value in
+                                        let distance = hypot(value.translation.width, value.translation.height)
+                                        if distance < 5 { return }  // 탭은 무시, 드래그만 처리
+                                        if !isDragSelecting {
+                                            isDragSelecting = true
+                                            dragToggledIndices.removeAll()
+                                            if let startIdx = rowIndex(at: value.startLocation.y) {
+                                                dragSelectingMode = !player.selectedTrackIndices.contains(startIdx)
+                                            }
+                                        }
+                                        
+                                        if let idx = rowIndex(at: value.location.y),
+                                           !dragToggledIndices.contains(idx) {
+                                            dragToggledIndices.insert(idx)
+                                            withAnimation(.spring(response: 0.2, dampingFraction: 0.8)) {
+                                                if dragSelectingMode {
+                                                    player.selectedTrackIndices.insert(idx)
+                                                } else {
+                                                    player.selectedTrackIndices.remove(idx)
+                                                }
+                                            }
+                                        }
+                                    }
+                                    .onEnded { value in
+                                        let distance = hypot(value.translation.width, value.translation.height)
+                                        if distance < 5 {
+                                            // 탭으로 판정: 해당 행 토글
+                                            if let idx = rowIndex(at: value.startLocation.y) {
+                                                withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
+                                                    player.toggleTrackSelection(at: idx)
+                                                }
+                                            }
+                                        }
+                                        isDragSelecting = false
+                                        dragToggledIndices.removeAll()
+                                    }
                             )
-                            .clipShape(Capsule())
-                        }
-                        .disabled(player.selectedTrackIndices.isEmpty)
                     }
-                    .padding(.horizontal, 4)
-                    .padding(.top, 8)
                 }
+                
+                
             }
         }
+    }
+    
+    private func rowIndex(at y: CGFloat) -> Int? {
+        for (index, frame) in rowFrames {
+            if y >= frame.minY && y <= frame.maxY {
+                return index
+            }
+        }
+        return nil
     }
 }
 
@@ -302,17 +505,23 @@ struct PlaylistRowView: View {
     let isPlaying: Bool
     let isCurrent: Bool
     var isSelected: Bool = false
+    var isSelectionMode: Bool = false
+    var onSelectToggle: (() -> Void)? = nil
     
     var body: some View {
         HStack(spacing: 12) {
             ZStack {
-                if isSelected {
+                if isSelectionMode && isSelected {
                     Circle()
                         .fill(Color.green)
                         .frame(width: 30, height: 30)
                     Image(systemName: "checkmark")
                         .font(.system(size: 13, weight: .bold))
                         .foregroundStyle(.white)
+                } else if isSelectionMode {
+                    Circle()
+                        .strokeBorder(Color.secondary.opacity(0.4), lineWidth: 1.5)
+                        .frame(width: 30, height: 30)
                 } else if isPlaying {
                     Circle()
                         .fill(Color.green.opacity(0.15))
@@ -331,20 +540,26 @@ struct PlaylistRowView: View {
                 }
             }
             .frame(width: 30)
+            .contentShape(Rectangle().inset(by: -8))
+            .onTapGesture {
+                if isSelectionMode {
+                    onSelectToggle?()
+                }
+            }
             
             VStack(alignment: .leading, spacing: 3) {
                 Text(track.name)
                     .font(.system(.subheadline, design: .rounded))
-                    .fontWeight(isCurrent ? .semibold : .regular)
-                    .foregroundStyle(isCurrent ? .green : Color.primary)
+                    .fontWeight((isCurrent || isPlaying) ? .bold : (isSelected ? .medium : .regular))
+                    .foregroundStyle((isCurrent || isSelected) ? .green : Color.primary)
                 Text(track.duration > 0 ? formatTime(track.duration) : "—")
                     .font(.system(.caption, design: .rounded))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(isSelected ? .green.opacity(0.7) : .secondary)
             }
             
             Spacer()
             
-            if isCurrent && !isSelected {
+            if isCurrent {
                 Circle()
                     .fill(.green)
                     .frame(width: 8, height: 8)
