@@ -61,7 +61,6 @@ enum PersistenceManager {
               let tracks = try? JSONDecoder().decode([TrackItem].self, from: data) else {
             return []
         }
-        // 오디오 파일이 실제로 존재하는 트랙만 반환
         return tracks.filter { track in
             let url = audioURL(trackID: track.id, fileName: track.name)
             return FileManager.default.fileExists(atPath: url.path)

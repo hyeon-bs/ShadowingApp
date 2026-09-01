@@ -41,8 +41,6 @@ struct ContentView: View {
                     .padding(.bottom, (isSelectionMode || player.loopAllEnabled) ? 70 : 0)
                 }
                 
-                // 선택 모드 하단 고정 바
-                // 반복 재생 중 하단 컨트롤 (일반 모드)
                 if !isSelectionMode && player.loopAllEnabled {
                     HStack(spacing: 16) {
                         Spacer()
@@ -100,17 +98,21 @@ struct ContentView: View {
                     .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
                 
-                // 선택 모드 하단 고정 바
                 if isSelectionMode {
                     HStack(spacing: 12) {
                         Button(role: .destructive) {
                                 let indices = player.selectedTrackIndices.sorted(by: >)
                                 for i in indices {
-                                    if i >= 0 && i < player.playlist.count {
-                                        let track = player.playlist[i]
-                                        PersistenceManager.deleteAudio(trackID: track.id, fileName: track.name)
-                                        PersistenceManager.deleteSentences(forTrackID: track.id)
-                                        player.playlist.remove(at: i)
+                                    guard i >= 0, i < player.playlist.count else { continue }
+                                    let track = player.playlist[i]
+                                    PersistenceManager.deleteAudio(trackID: track.id, fileName: track.name)
+                                    PersistenceManager.deleteSentences(forTrackID: track.id)
+                                    player.playlist.remove(at: i)
+                                    if player.currentTrackIndex == i {
+                                        player.stop()
+                                        player.currentTrackIndex = -1
+                                    } else if player.currentTrackIndex > i {
+                                        player.currentTrackIndex -= 1
                                     }
                                 }
                                 PersistenceManager.savePlaylist(player.playlist)
@@ -211,7 +213,7 @@ struct PlaylistView: View {
     @ObservedObject var player: AudioPlayerModel
     @Binding var isSelectionMode: Bool
     @State private var isDragSelecting = false
-    @State private var dragSelectingMode: Bool = true  // true=select, false=deselect
+    @State private var dragSelectingMode: Bool = true
     @State private var dragToggledIndices: Set<Int> = []
     @State private var rowFrames: [Int: CGRect] = [:]
     var onTapTrack: (Int) -> Void
@@ -296,9 +298,9 @@ struct PlaylistView: View {
                             }
                             .buttonStyle(.plain)
                             
-                            // 선택 모드: x 삭제 버튼
                             if isSelectionMode {
                                 Button {
+                                    guard index >= 0, index < player.playlist.count else { return }
                                     let trackToDelete = player.playlist[index]
                                     PersistenceManager.deleteAudio(trackID: trackToDelete.id, fileName: trackToDelete.name)
                                     PersistenceManager.deleteSentences(forTrackID: trackToDelete.id)
@@ -325,7 +327,6 @@ struct PlaylistView: View {
                             LongPressGesture(minimumDuration: 0.3)
                                 .onEnded { _ in
                                     if player.loopAllEnabled {
-                                        // 반복재생 중 꾹 누르면 재생 중지 → 선택 모드 진입
                                         player.loopAllEnabled = false
                                         player.stop()
                                         withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
@@ -368,7 +369,7 @@ struct PlaylistView: View {
                                 DragGesture(minimumDistance: 0, coordinateSpace: .named("playlistArea"))
                                     .onChanged { value in
                                         let distance = hypot(value.translation.width, value.translation.height)
-                                        if distance < 5 { return }  // 탭은 무시, 드래그만 처리
+                                        if distance < 5 { return }
                                         if !isDragSelecting {
                                             isDragSelecting = true
                                             dragToggledIndices.removeAll()
@@ -392,7 +393,6 @@ struct PlaylistView: View {
                                     .onEnded { value in
                                         let distance = hypot(value.translation.width, value.translation.height)
                                         if distance < 5 {
-                                            // 탭으로 판정: 해당 행 토글
                                             if let idx = rowIndex(at: value.startLocation.y) {
                                                 withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
                                                     player.toggleTrackSelection(at: idx)
@@ -485,13 +485,15 @@ struct TrackDetailView: View {
         .navigationTitle(trackIndex < player.playlist.count ? player.playlist[trackIndex].name : "")
         .navigationBarTitleDisplayMode(.inline)
         .task {
-            guard trackIndex < player.playlist.count else { return }
+            guard trackIndex >= 0, trackIndex < player.playlist.count else { return }
             let track = player.playlist[trackIndex]
             if !analyzer.loadSentences(forTrackID: track.id) {
                 analyzer.reset()
                 analyzer.currentTrackID = track.id
             }
             try? await Task.sleep(nanoseconds: 200_000_000)
+            guard !Task.isCancelled,
+                  trackIndex < player.playlist.count else { return }
             player.selectTrack(at: trackIndex)
         }
         .onDisappear { player.stopAndDeselect() }
@@ -597,9 +599,13 @@ struct WaveformView: View {
                 }
                 
                 HStack(spacing: 2.5) {
-                    ForEach(0..<60, id: \.self) { i in
-                        let barPos = Double(i) / 60.0
-                        
+                    let barCount = 60
+                    let progress = player.currentTime / totalDuration
+                    let filledBars = Int(ceil(progress * Double(barCount)))
+
+                    ForEach(0..<barCount, id: \.self) { i in
+                        let barStartPct = Double(i) / Double(barCount)
+
                         let h: CGFloat = {
                             if i < player.waveformData.count {
                                 return CGFloat(player.waveformData[i])
@@ -607,32 +613,22 @@ struct WaveformView: View {
                                 return 0.2
                             }
                         }()
-                        
-                        let progress = player.currentTime / totalDuration
+
                         let isInLoop = player.loopSectionEnabled
-                        let inLoopRange = isInLoop && barPos >= loopStartPct && barPos < loopEndPct
-                        let showGreen: Bool = isInLoop ? (inLoopRange && barPos < progress) : (barPos < progress)
-                        let activeColor: Color = .green
-                        
+                        let inLoopRange = isInLoop && barStartPct >= loopStartPct && barStartPct < loopEndPct
+                        let showGreen: Bool = isInLoop ? (inLoopRange && i < filledBars) : (i < filledBars)
+
                         Capsule()
-                            .fill(showGreen ? activeColor : Color.secondary.opacity(0.25))
+                            .fill(showGreen ? Color.green : Color.secondary.opacity(0.25))
                             .frame(height: geo.size.height * max(0.1, h))
                     }
                 }
                 .padding(.horizontal, waveformInset)
                 .frame(maxHeight: .infinity, alignment: .center)
                 
-                if player.duration > 0 {
-                    // let loopColor: Color = .green
-                    
-                    // let dotHeight = max(18, geo.size.height - 20)
-                    // let dotCount = max(4, Int(dotHeight / 8))
-                }
+
             }
             .background(Color(.secondarySystemGroupedBackground))
-            // Removed drag gesture for range selection
-            
-            // Simplified onTapGesture to only seek
             .onTapGesture { location in
                 guard player.duration > 0 else { return }
                 let clampedX = max(waveformInset, min(geo.size.width - waveformInset, location.x))
@@ -704,14 +700,12 @@ struct SpeedControlView: View {
                     .font(.system(.subheadline, design: .rounded))
                     .fontWeight(.bold)
                     .foregroundStyle(.green)
-                    // 값이 바뀔 때 숫자가 부드럽게 변하도록 애니메이션 추가
                     .contentTransition(.numericText())
             }
             
             HStack(spacing: 8) {
                 ForEach(speeds, id: \.self) { speed in
                     Button {
-                        // 애니메이션과 함께 속도 변경
                         withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
                             player.updatePlaybackRate(speed)
                         }
@@ -721,12 +715,11 @@ struct SpeedControlView: View {
                             .fontWeight(.bold)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 8)
-                        // 선택 상태에 따른 색상 변경
                             .background(isCurrentSpeed(speed) ? Color.green : Color(.tertiarySystemGroupedBackground))
                             .foregroundStyle(isCurrentSpeed(speed) ? .white : .primary)
                             .clipShape(Capsule())
                     }
-                    .buttonStyle(.plain) // 버튼 클릭 시 전체가 깜빡이는 현상 방지
+                    .buttonStyle(.plain)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .center)
@@ -736,7 +729,6 @@ struct SpeedControlView: View {
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
     
-    // 로직을 별도 함수로 빼면 바디 코드가 더 읽기 쉬워집니다.
     private func isCurrentSpeed(_ speed: Float) -> Bool {
         abs(player.playbackRate - speed) < 0.01
     }
@@ -760,38 +752,33 @@ struct ScriptView: View {
     
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            // 1. 헤더 영역 (제목 & 토글 버튼)
             HStack(spacing: 12) {
                 Text("스크립트")
                     .font(.system(.subheadline, design: .rounded))
                     .fontWeight(.bold)
                 
-                // 보이기 / 숨기기 버튼 (항상 노출)
                 Button {
                     withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
                         isVisible.toggle()
                     }
                 } label: {
                     Image(systemName: isVisible ? "eye.slash" : "eye")
-                        .symbolRenderingMode(.palette) // 🎨 뼈대와 포인트를 다른 색으로 줄 때
-                        .foregroundStyle(.gray)  // 슬래시는 빨강, 눈은 회색
+                        .symbolRenderingMode(.palette)
+                        .foregroundStyle(.gray)
                         .font(.system(.caption, design: .rounded))
                         .fontWeight(.light)
                         .padding(.horizontal, 5)
                         .padding(.vertical, 5)
-                        //.background(Color.gray.opacity(0.12))
                         .clipShape(Capsule())
                 }
                 
                 Spacer()
         
-                // 편집 토글 버튼 (우측 상단)
                 Button {
                     withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                         isEditingMode.toggle()
                         editMode = isEditingMode ? .active : .inactive
                         if isEditingMode {
-                            // 편집 모드 진입 시 재생 정지
                             if player.isPlaying { player.togglePlay() }
                             player.stopSectionRepeat()
                         }
@@ -806,7 +793,6 @@ struct ScriptView: View {
                         .foregroundColor(isEditingMode ? .white : .primary)
                         .clipShape(Capsule())
                 }
-                // 편집 중일 때만 노출되는 행 추가 버튼
                 if isEditingMode {
                     Button {
                         let start = max(0, player.currentTime)
@@ -1081,7 +1067,7 @@ private struct SentenceDropDelegate: DropDelegate {
 }
 
 
-// MARK: - Mini Waveform Editor (드래그로 구간 선택)
+// MARK: - Mini Waveform Editor
 struct MiniWaveformEditor: View {
     @Binding var startTime: Double
     @Binding var endTime: Double
@@ -1104,15 +1090,14 @@ struct MiniWaveformEditor: View {
             let totalDuration = max(0.1, duration)
             let startPct = CGFloat(startTime / totalDuration)
             let endPct = CGFloat(endTime / totalDuration)
-            
+
             ZStack(alignment: .leading) {
-                // 1. 웨이브폼 바
                 HStack(spacing: 2) {
                     ForEach(0..<60, id: \.self) { i in
                         let h = i < waveformData.count ? CGFloat(waveformData[i]) : 0.2
                         let barPct = CGFloat(i) / 60.0
                         let inRange = barPct >= startPct && barPct < endPct
-                        
+
                         Capsule()
                             .fill(inRange ? Color.green : Color.secondary.opacity(0.2))
                             .frame(height: geo.size.height * 0.7 * max(0.1, h))
@@ -1120,16 +1105,14 @@ struct MiniWaveformEditor: View {
                 }
                 .padding(.horizontal, waveformInset)
                 .frame(maxHeight: .infinity, alignment: .center)
-                
-                // 2. 선택 영역 배경
+
                 RoundedRectangle(cornerRadius: 4, style: .continuous)
                     .fill(Color.green.opacity(0.08))
                     .frame(width: max(0, usableWidth * (endPct - startPct)))
                     .offset(x: waveformInset + usableWidth * startPct)
                     .frame(maxHeight: .infinity)
                     .allowsHitTesting(false)
-                
-                // 3. 플레이헤드
+
                 if currentTime >= startTime && currentTime <= endTime {
                     let playPct = CGFloat(currentTime / totalDuration)
                     Rectangle()
@@ -1139,8 +1122,7 @@ struct MiniWaveformEditor: View {
                         .frame(maxHeight: .infinity)
                         .allowsHitTesting(false)
                 }
-                
-                // 4. 왼쪽 핸들 (시작)
+
                 handleView()
                     .offset(x: waveformInset + usableWidth * startPct - handleWidth)
                     .gesture(
@@ -1157,8 +1139,7 @@ struct MiniWaveformEditor: View {
                             }
                             .onEnded { _ in isDraggingStart = false }
                     )
-                
-                // 5. 오른쪽 핸들 (끝)
+
                 handleView()
                     .offset(x: waveformInset + usableWidth * endPct)
                     .gesture(
@@ -1213,7 +1194,6 @@ struct QuickEditSheet: View {
     var body: some View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 16) {
-                // 1. 문장 텍스트 편집
                 VStack(alignment: .leading, spacing: 6) {
                     Text("문장")
                         .font(.system(.caption, design: .rounded))
@@ -1227,7 +1207,6 @@ struct QuickEditSheet: View {
                         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
                 
-                // 2. 웨이브폼 구간 선택
                 VStack(alignment: .leading, spacing: 6) {
                     Text("구간")
                         .font(.system(.caption, design: .rounded))
@@ -1245,7 +1224,6 @@ struct QuickEditSheet: View {
                     .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
                 
-                // 3. 시간 표시 + 재생 버튼
                 HStack(spacing: 12) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("시작")
@@ -1277,7 +1255,6 @@ struct QuickEditSheet: View {
                     .background(Color(.tertiarySystemGroupedBackground))
                     .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                     
-                    // 미리듣기 버튼
                     Button {
                         if player.isPlaying {
                             player.togglePlay()

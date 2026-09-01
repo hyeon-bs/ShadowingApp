@@ -7,22 +7,21 @@ struct TrackItem: Identifiable, Hashable, Codable {
     let id: UUID
     let name: String
     var duration: Double
-
-    /// 오디오 파일 URL (Application Support/audio/ 디렉토리 기준으로 재구성)
+    
     var url: URL {
         PersistenceManager.audioURL(trackID: id, fileName: name)
     }
-
+    
     init(id: UUID = UUID(), name: String, duration: Double) {
         self.id = id
         self.name = name
         self.duration = duration
     }
-
+    
     func hash(into hasher: inout Hasher) {
         hasher.combine(id)
     }
-
+    
     static func == (lhs: TrackItem, rhs: TrackItem) -> Bool {
         lhs.id == rhs.id
     }
@@ -31,26 +30,22 @@ struct TrackItem: Identifiable, Hashable, Codable {
 // MARK: - Sentence Segment
 struct SentenceSegment: Identifiable, Codable {
     let id: UUID
-    var startTime: Double // 이미 var일 확률이 높지만 확인해 보세요.
+    var startTime: Double
     var endTime: Double
-    var text: String      // 이 부분을 'let'에서 'var'로 변경!
-
-    init(id: UUID = UUID(), startTime: Double, endTime: Double, text: String) {
+    var text: String
+    
+    init(id: UUID = UUID(), text: String, startTime: Double, endTime: Double) {
         self.id = id
+        self.text = text
         self.startTime = startTime
         self.endTime = endTime
-        self.text = text
-    }
-
-    init(text: String, startTime: Double, endTime: Double) {
-        self.init(id: UUID(), startTime: startTime, endTime: endTime, text: text)
     }
 }
 
 // MARK: - Audio Player Model
 @MainActor
 class AudioPlayerModel: NSObject, ObservableObject {
-
+    
     // MARK: - Published
     @Published var audioURL: URL?
     @Published var trackName: String = ""
@@ -60,43 +55,40 @@ class AudioPlayerModel: NSObject, ObservableObject {
     @Published var playbackRate: Float = 1.0
     @Published var waveformData: [Float] = []
     
-    // 플레이리스트
     @Published var playlist: [TrackItem] = []
     @Published var currentTrackIndex: Int = -1
-    @Published var selectedTrackIndices: Set<Int> = []  // 꾹 눌러 선택한 트랙
-
-    // 반복 (재생 모드용 섹션 반복) - 편집 모드 A/B와 별개
+    @Published var selectedTrackIndices: Set<Int> = []
+    
     @Published var loopSectionEnabled: Bool = false
     @Published var isWaveformLoopSelection: Bool = false
-    @Published var loopAllEnabled: Bool = false  // 선택된 트랙 전체 반복
+    @Published var loopAllEnabled: Bool = false
     @Published var loopStart: Double = 0
     @Published var loopEnd: Double = 10
     @Published var loopCount: Int = 3
-
+    
     // MARK: - Private
     private var player: AVAudioPlayer?
     private var timer: Timer?
     private var currentLoopRepeat: Int = 0
-
+    private var playStartDate: Date = .now
+    private var playStartOffset: Double = 0
+    private var waveformTask: Task<Void, Never>?
+    private var durationTask: Task<Void, Never>?
+    
     // MARK: - Playlist 관리
     func addTrack(url: URL) {
         let accessing = url.startAccessingSecurityScopedResource()
         defer { if accessing { url.stopAccessingSecurityScopedResource() } }
-
+        
         let trackID = UUID()
         let fileName = url.lastPathComponent
-
-        // 임시 디렉토리에 먼저 복사 후 duration 추출, 그 다음 영구 저장소로 이동
+        
         let tempURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString + "_" + fileName)
         try? FileManager.default.copyItem(at: url, to: tempURL)
-
-        var dur = 0.0
-        if let p = try? AVAudioPlayer(contentsOf: tempURL) {
-            dur = p.duration
-        }
-
-        // 영구 저장소로 복사
+        
+        let quickDur: Double = (try? AVAudioPlayer(contentsOf: tempURL))?.duration ?? 0
+        
         guard let _ = PersistenceManager.copyAudioToPermanentStorage(
             from: tempURL, trackID: trackID, fileName: fileName
         ) else {
@@ -104,22 +96,34 @@ class AudioPlayerModel: NSObject, ObservableObject {
             return
         }
         try? FileManager.default.removeItem(at: tempURL)
-
-        let track = TrackItem(id: trackID, name: fileName, duration: dur)
+        
+        let track = TrackItem(id: trackID, name: fileName, duration: quickDur)
         playlist.append(track)
         PersistenceManager.savePlaylist(playlist)
+        
+        let permanentURL = track.url
+        let insertedIndex = playlist.count - 1
+        Task.detached(priority: .userInitiated) {
+            let decoded = Self.decodedDuration(url: permanentURL)
+            guard decoded > 0 else { return }
+            await MainActor.run {
+                guard insertedIndex < self.playlist.count,
+                      self.playlist[insertedIndex].id == trackID else { return }
+                self.playlist[insertedIndex].duration = decoded
+                PersistenceManager.savePlaylist(self.playlist)
+            }
+        }
     }
     
     func removeTrack(at index: Int) {
         guard index < playlist.count else { return }
         let track = playlist[index]
         playlist.remove(at: index)
-
-        // 관련 파일 정리
+        
         PersistenceManager.deleteAudio(trackID: track.id, fileName: track.name)
         PersistenceManager.deleteSentences(forTrackID: track.id)
         PersistenceManager.savePlaylist(playlist)
-
+        
         if currentTrackIndex == index {
             stopPlayback()
             if !playlist.isEmpty {
@@ -133,45 +137,53 @@ class AudioPlayerModel: NSObject, ObservableObject {
             currentTrackIndex -= 1
         }
     }
-
-    /// 앱 시작 시 저장된 재생목록 로드
+    
     func loadPersistedPlaylist() {
         guard playlist.isEmpty else { return }
         playlist = PersistenceManager.loadPlaylist()
+        
+        let trackSnapshots = playlist.map { (id: $0.id, url: $0.url, duration: $0.duration) }
+        Task.detached(priority: .utility) {
+            var updates: [(Int, Double)] = []
+            for i in trackSnapshots.indices {
+                let real = Self.decodedDuration(url: trackSnapshots[i].url)
+                if real > 0, abs(real - trackSnapshots[i].duration) > 0.5 {
+                    updates.append((i, real))
+                }
+            }
+            guard !updates.isEmpty else { return }
+            await MainActor.run {
+                for (i, dur) in updates {
+                    guard i < self.playlist.count,
+                          self.playlist[i].id == trackSnapshots[i].id else { continue }
+                    self.playlist[i].duration = dur
+                }
+                PersistenceManager.savePlaylist(self.playlist)
+            }
+        }
     }
-
-    /// 트랙 선택만 (재생 안 함) — 탭 시 사용
+    
     func selectTrack(at index: Int) {
-        // 1. 인덱스 범위 확인 (가장 중요!)
         guard index >= 0 && index < playlist.count else { return }
-        
-        let track = playlist[index]
-        self.currentTrackIndex = index
-        
-        // 3. 오디오 로드 및 설정
-        loadAudio(url: track.url)
+        currentTrackIndex = index
+        loadAudio(url: playlist[index].url)
     }
-
-    /// 트랙 선택 + 바로 재생 — 꾹 누르기 시 사용
+    
     func playTrack(at index: Int) {
         guard index < playlist.count else { return }
-        
-        // 트랙 재생 시 구간 반복 해제 (전체 재생)
         stopSectionRepeat()
-
+        
         if currentTrackIndex == index {
-            // 이미 선택된 트랙이면 처음부터 재생
             seek(to: 0)
             if !isPlaying { togglePlay() }
             return
         }
-
+        
         currentTrackIndex = index
         loadAudio(url: playlist[index].url)
         togglePlay()
     }
-
-    /// 트랙 선택 해제 + 정지
+    
     func stopAndDeselect() {
         stopPlayback()
         audioURL = nil
@@ -179,7 +191,7 @@ class AudioPlayerModel: NSObject, ObservableObject {
         waveformData = []
         isWaveformLoopSelection = false
     }
-
+    
     private func stopPlayback() {
         player?.stop()
         player = nil
@@ -187,8 +199,7 @@ class AudioPlayerModel: NSObject, ObservableObject {
         isPlaying = false
         currentTime = 0
     }
-
-    /// 선택 트랙 토글 (꾹 눌러 선택/해제)
+    
     func toggleTrackSelection(at index: Int) {
         if selectedTrackIndices.contains(index) {
             selectedTrackIndices.remove(index)
@@ -196,8 +207,7 @@ class AudioPlayerModel: NSObject, ObservableObject {
             selectedTrackIndices.insert(index)
         }
     }
-
-    /// 선택된 트랙들 전체 반복 재생 시작
+    
     func playSelectedTracks() {
         let sorted = selectedTrackIndices.sorted()
         guard let first = sorted.first else { return }
@@ -206,12 +216,12 @@ class AudioPlayerModel: NSObject, ObservableObject {
     }
     
     func stop() {
-        self.player?.stop()
-        self.isPlaying = false
-        self.timer?.invalidate()
-        self.timer = nil
+        player?.stop()
+        stopTimer()
+        isPlaying = false
+        currentTime = 0
     }
-
+    
     // MARK: - Playback
     func togglePlay() {
         guard let player = player else { return }
@@ -220,6 +230,8 @@ class AudioPlayerModel: NSObject, ObservableObject {
             stopTimer()
             isPlaying = false
         } else {
+            playStartOffset = player.currentTime
+            playStartDate = Date()
             player.play()
             startTimer()
             isPlaying = true
@@ -230,8 +242,10 @@ class AudioPlayerModel: NSObject, ObservableObject {
         let clamped = max(0, min(duration, time))
         player?.currentTime = clamped
         currentTime = clamped
+        playStartOffset = clamped
+        playStartDate = Date()
     }
-
+    
     func startSectionRepeat(repeatCount: Int = 10) {
         guard duration > 0 else { return }
         loopSectionEnabled = true
@@ -243,35 +257,52 @@ class AudioPlayerModel: NSObject, ObservableObject {
             togglePlay()
         }
     }
-
-    /// 구간 반복 해제 (전체 재생으로 복귀)
+    
     func stopSectionRepeat() {
         loopSectionEnabled = false
         currentLoopRepeat = 0
     }
-
+    
     func updatePlaybackRate(_ rate: Float) {
+        if let player = player {
+            playStartOffset = player.currentTime
+            playStartDate = Date()
+        }
         playbackRate = rate
         player?.rate = rate
     }
-
+    
     // MARK: - Timer
     private func startTimer() {
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+        let t = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
             guard let self else { return }
             Task { @MainActor in
                 guard let player = self.player else { return }
-                self.currentTime = player.currentTime
 
-                // 구간 반복: 설정된 횟수만큼 반복 후 자동 종료
-                if self.loopSectionEnabled, player.currentTime >= self.loopEnd {
+                let elapsed = Date().timeIntervalSince(self.playStartDate)
+                var computed = self.playStartOffset + elapsed * Double(player.rate)
+
+                let actual = player.currentTime
+                if player.isPlaying, actual > 0, abs(computed - actual) > 0.3 {
+                    self.playStartOffset = actual
+                    self.playStartDate = Date()
+                    computed = actual
+                }
+
+                self.currentTime = min(computed, self.duration)
+
+                if self.loopSectionEnabled {
+                    self.currentTime = min(self.currentTime, self.loopEnd)
+                }
+
+                if self.loopSectionEnabled, self.currentTime >= self.loopEnd {
                     if self.currentLoopRepeat < max(0, self.loopCount - 1) {
                         self.currentLoopRepeat += 1
                         self.seek(to: self.loopStart)
                     } else {
                         self.seek(to: self.loopStart)
-                        player.pause()
+                        self.player?.stop()
                         self.stopTimer()
                         self.isPlaying = false
                         self.currentLoopRepeat = 0
@@ -279,121 +310,199 @@ class AudioPlayerModel: NSObject, ObservableObject {
                 }
             }
         }
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
     }
-
+    
     private func stopTimer() {
         timer?.invalidate()
         timer = nil
     }
-
+    
     // MARK: - Waveform
     private func generateWaveform(url: URL) {
-        Task.detached(priority: .utility) {
-            let bars = await Self.computeWaveform(url: url)
-
+        waveformTask?.cancel()
+        waveformTask = Task.detached(priority: .utility) {
+            let bars = await Self.computeWaveform(url: url, targetBars: 60)
+            guard !Task.isCancelled else { return }
             await MainActor.run {
+                guard self.audioURL == url else { return }
                 self.waveformData = bars
             }
         }
     }
+    
+    nonisolated static func decodedDuration(url: URL) -> Double {
+        guard let file = try? AVAudioFile(forReading: url) else { return 0 }
+        let format = file.processingFormat
+        let sampleRate = format.sampleRate
+        guard sampleRate > 0 else { return 0 }
 
-    private nonisolated static func computeWaveform(url: URL) async -> [Float] {
+        let chunkSize: AVAudioFrameCount = 8192
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: chunkSize) else { return 0 }
+
+        var totalDecodedFrames: Int64 = 0
+        while true {
+            buffer.frameLength = 0
+            do {
+                try file.read(into: buffer, frameCount: chunkSize)
+            } catch {
+                break
+            }
+            let read = Int64(buffer.frameLength)
+            if read <= 0 { break }
+            totalDecodedFrames += read
+        }
+        return Double(totalDecodedFrames) / sampleRate
+    }
+    
+    private nonisolated static func computeWaveform(url: URL, targetBars: Int) async -> [Float] {
         do {
             let file = try AVAudioFile(forReading: url)
             let format = file.processingFormat
-            let totalFrames = max(1, Int(file.length))
-            let targetBars = 60
-            let framesPerBar = max(1, totalFrames / targetBars)
-            let chunkSize = min(4096, max(512, framesPerBar))
-
-            guard let buffer = AVAudioPCMBuffer(
-                pcmFormat: format,
-                frameCapacity: AVAudioFrameCount(chunkSize)
-            ) else {
-                return (0..<60).map { _ in Float.random(in: 0.2...1.0) }
+            let channelCount = Int(format.channelCount)
+            
+            let chunkSize: AVAudioFrameCount = 8192
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: chunkSize) else {
+                return Array(repeating: 0.05, count: targetBars)
             }
-
-            var bars = Array(repeating: Float(0), count: targetBars)
-            var counts = Array(repeating: 0, count: targetBars)
-            var globalFrame = 0
-
-            while globalFrame < totalFrames {
+            
+            var barSumSquares = [Double](repeating: 0, count: targetBars)
+            var barSampleCounts = [Int](repeating: 0, count: targetBars)
+            
+            // Pass 1: 총 디코딩 프레임 수 계산
+            var totalDecodedFrames: Int64 = 0
+            while true {
                 buffer.frameLength = 0
-                try file.read(into: buffer, frameCount: AVAudioFrameCount(chunkSize))
-                let readFrames = Int(buffer.frameLength)
+                do { try file.read(into: buffer, frameCount: chunkSize) } catch { break }
+                let read = Int64(buffer.frameLength)
+                if read <= 0 { break }
+                totalDecodedFrames += read
+            }
+            
+            guard totalDecodedFrames > 0 else {
+                return Array(repeating: 0.05, count: targetBars)
+            }
+            
+            // Pass 2: RMS 에너지를 바별로 누적
+            let file2 = try AVAudioFile(forReading: url)
+            let format2 = file2.processingFormat
+            guard let buffer2 = AVAudioPCMBuffer(pcmFormat: format2, frameCapacity: chunkSize) else {
+                return Array(repeating: 0.05, count: targetBars)
+            }
+            
+            let framesPerBar = Double(totalDecodedFrames) / Double(targetBars)
+            var globalFrameOffset: Int64 = 0
+            
+            while true {
+                buffer2.frameLength = 0
+                do { try file2.read(into: buffer2, frameCount: chunkSize) } catch { break }
+                let readFrames = Int(buffer2.frameLength)
                 if readFrames <= 0 { break }
-                guard let channelData = buffer.floatChannelData?[0] else { break }
-
-                for i in 0..<readFrames {
-                    let absoluteFrame = globalFrame + i
-                    let barIndex = min(targetBars - 1, absoluteFrame / framesPerBar)
-                    bars[barIndex] += abs(channelData[i])
-                    counts[barIndex] += 1
+                
+                guard let floatChannels = buffer2.floatChannelData else { break }
+                
+                for j in 0..<readFrames {
+                    let globalFrame = globalFrameOffset + Int64(j)
+                    let barIndex = min(Int(Double(globalFrame) / framesPerBar), targetBars - 1)
+                    
+                    var sampleSum: Float = 0
+                    for ch in 0..<channelCount {
+                        sampleSum += floatChannels[ch][j]
+                    }
+                    let avg = Double(sampleSum / Float(channelCount))
+                    barSumSquares[barIndex] += avg * avg
+                    barSampleCounts[barIndex] += 1
                 }
-                globalFrame += readFrames
+                
+                globalFrameOffset += Int64(readFrames)
             }
-
+            
+            var bars = [Float](repeating: 0, count: targetBars)
             for i in 0..<targetBars {
-                if counts[i] > 0 {
-                    bars[i] /= Float(counts[i])
+                let count = barSampleCounts[i]
+                if count > 0 {
+                    bars[i] = Float(sqrt(barSumSquares[i] / Double(count)))
                 }
             }
-
-            let maxVal = bars.max() ?? 1.0
-            return maxVal > 0 ? bars.map { $0 / maxVal } : bars
+            
+            let rawMax = bars.max() ?? 1.0
+            if rawMax > 0 {
+                for i in 0..<targetBars {
+                    bars[i] = max(0.05, powf(bars[i] / rawMax, 0.7))
+                }
+            } else {
+                bars = Array(repeating: 0.05, count: targetBars)
+            }
+            
+            return bars
         } catch {
-            return (0..<60).map { _ in Float.random(in: 0.2...1.0) }
+            return Array(repeating: 0.05, count: targetBars)
         }
     }
-
+    
     // MARK: - Load Audio
     func loadAudio(url: URL) {
         stopPlayback()
-
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            print("파일이 존재하지 않음: \(url.path)")
-            return
-        }
-
+        waveformTask?.cancel()
+        durationTask?.cancel()
+        
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        
         do {
             try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
             try AVAudioSession.sharedInstance().setActive(true)
-
+            
             player = try AVAudioPlayer(contentsOf: url)
             player?.delegate = self
-            player?.prepareToPlay()
             player?.enableRate = true
             player?.rate = playbackRate
-
+            player?.prepareToPlay()
+            
             audioURL = url
             trackName = url.lastPathComponent
             duration = player?.duration ?? 0
-            
+            loopStart = 0
+            loopEnd = min(10, duration)
             currentTime = 0
 
             generateWaveform(url: url)
+
+            let capturedURL = url
+            durationTask = Task.detached(priority: .userInitiated) {
+                let decoded = Self.decodedDuration(url: capturedURL)
+                guard decoded > 0, !Task.isCancelled else { return }
+                await MainActor.run {
+                    guard self.audioURL == capturedURL else { return }
+                    self.duration = decoded
+                    self.loopEnd = min(self.loopEnd, decoded)
+
+                    if self.currentTrackIndex >= 0,
+                       self.currentTrackIndex < self.playlist.count {
+                        self.playlist[self.currentTrackIndex].duration = decoded
+                        PersistenceManager.savePlaylist(self.playlist)
+                    }
+                }
+            }
         } catch {
             print("오디오 로드 실패: \(error)")
         }
     }
-
-    /// 반복 재생 중지
+    
     func stopLoopAll() {
         loopAllEnabled = false
         stopPlayback()
     }
-
-    // MARK: - 다음 트랙으로
+    
+    // MARK: - 트랙 이동
     func playNextTrack() {
         guard !playlist.isEmpty else { return }
-
+        
         if loopAllEnabled && !selectedTrackIndices.isEmpty {
-            // 선택된 트랙들만 순회
             let sorted = selectedTrackIndices.sorted()
             if let nextIdx = sorted.first(where: { $0 > currentTrackIndex }) {
                 playTrack(at: nextIdx)
             } else {
-                // 마지막이면 다시 첫 번째 선택 트랙으로
                 playTrack(at: sorted[0])
             }
         } else {
@@ -401,24 +510,19 @@ class AudioPlayerModel: NSObject, ObservableObject {
             if nextIndex < playlist.count {
                 playTrack(at: nextIndex)
             } else if currentTrackIndex >= 0 && currentTrackIndex < playlist.count {
-                // 단일 트랙 재생 완료 시 현재 트랙을 다시 시작
                 playTrack(at: currentTrackIndex)
-            } else {
-                stopPlayback()
             }
         }
     }
-
-    /// 이전 트랙으로
+    
     func playPreviousTrack() {
         guard !playlist.isEmpty else { return }
-
+        
         if loopAllEnabled && !selectedTrackIndices.isEmpty {
             let sorted = selectedTrackIndices.sorted()
             if let prevIdx = sorted.last(where: { $0 < currentTrackIndex }) {
                 playTrack(at: prevIdx)
             } else {
-                // 처음이면 마지막 선택 트랙으로
                 playTrack(at: sorted.last ?? currentTrackIndex)
             }
         } else {
@@ -426,13 +530,12 @@ class AudioPlayerModel: NSObject, ObservableObject {
             if prevIndex >= 0 {
                 playTrack(at: prevIndex)
             } else {
-                // 처음이면 현재 트랙을 다시 시작
                 seek(to: 0)
                 if !isPlaying { togglePlay() }
             }
         }
     }
-
+    
 }
 
 // MARK: - AVAudioPlayerDelegate
@@ -441,8 +544,22 @@ extension AudioPlayerModel: AVAudioPlayerDelegate {
         Task { @MainActor in
             self.stopTimer()
             self.isPlaying = false
-            self.currentTime = 0
-            self.playNextTrack()
+            
+            guard !self.loopSectionEnabled else { return }
+            
+            let finishedURL = self.audioURL
+            self.currentTime = self.duration
+            
+            try? await Task.sleep(for: .milliseconds(300))
+            
+            guard self.audioURL == finishedURL, self.player != nil else { return }
+            
+            if self.loopAllEnabled {
+                self.playNextTrack()
+            } else {
+                self.seek(to: 0)
+                self.togglePlay()
+            }
         }
     }
 }

@@ -11,7 +11,6 @@ final class ScriptAnalyzer: ObservableObject {
     @Published var isRangeEditing = false
     @Published var editingSentenceID: UUID?
 
-    /// 현재 작업 중인 트랙 ID (저장 시 사용)
     var currentTrackID: UUID?
 
     private var recognitionTask: SFSpeechRecognitionTask?
@@ -29,7 +28,6 @@ final class ScriptAnalyzer: ObservableObject {
         sentences.removeAll()
     }
 
-    /// 디스크에서 저장된 문장 로드. 성공하면 true 반환.
     func loadSentences(forTrackID trackID: UUID) -> Bool {
         currentTrackID = trackID
         if let saved = PersistenceManager.loadSentences(forTrackID: trackID) {
@@ -40,7 +38,6 @@ final class ScriptAnalyzer: ObservableObject {
         return false
     }
 
-    /// 현재 문장을 디스크에 저장
     func saveSentencesIfNeeded() {
         guard let trackID = currentTrackID, !sentences.isEmpty else { return }
         PersistenceManager.saveSentences(sentences, forTrackID: trackID)
@@ -292,7 +289,6 @@ final class ScriptAnalyzer: ObservableObject {
     }
 
     private func makeAvailableRecognizer() -> SFSpeechRecognizer? {
-        // 영어 학습 모드: 인식 언어를 en-US로 고정
         guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US")) else {
             return nil
         }
@@ -303,7 +299,6 @@ final class ScriptAnalyzer: ObservableObject {
         var text = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return text }
 
-        // 자주 발생하는 축약형 인식 오류 보정
         let replacements: [String: String] = [
             " i ": " I ",
             " im ": " I'm ",
@@ -320,22 +315,18 @@ final class ScriptAnalyzer: ObservableObject {
             " youre ": " you're "
         ]
 
-        // 단어 경계 보정을 위해 앞뒤 공백 패딩
         text = " \(text) "
         for (wrong, corrected) in replacements {
             text = text.replacingOccurrences(of: wrong, with: corrected, options: [.caseInsensitive])
         }
 
-        // 다중 공백 정리
         text = text.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
         text = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // 첫 글자 대문자 처리
         if let first = text.first {
             text.replaceSubrange(text.startIndex...text.startIndex, with: String(first).uppercased())
         }
 
-        // 문장부호가 없으면 마침표 추가
         if let last = text.last, !".!?".contains(last) {
             text += "."
         }
